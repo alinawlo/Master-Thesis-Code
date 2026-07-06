@@ -1,0 +1,7 @@
+google-genai
+langchain
+langchain-google-genai
+pandas
+tavily-python
+supabase
+python-dotenv
