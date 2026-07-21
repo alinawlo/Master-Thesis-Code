@@ -1,0 +1,21 @@
+.DS_Store
+
+# Node dependency directories
+node_modules/
+reformagent/node_modules/
+
+# Production build outputs
+dist/
+reformagent/dist/
+
+# Local environment configuration
+.env
+.env*.local
+reformagent/.env
+reformagent/.env*.local
+
+# Local CSV extracts directory
+reformagent/csvs/
+
+# IDE files
+.vscode/

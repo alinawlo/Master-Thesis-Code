@@ -19,13 +19,20 @@ import Pipeline from './components/Pipeline';
 import { ProcessedDocument } from './types';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'explorer' | 'pipeline'>('explorer');
   const [documents, setDocuments] = useState<ProcessedDocument[]>([]);
+  const [localFileName, setLocalFileName] = useState<string | null>(null);
+  const [isPipelineOpen, setIsPipelineOpen] = useState(false);
 
   const handlePipelineComplete = (newDoc: ProcessedDocument) => {
     setDocuments((prev) => [...prev, newDoc]);
-    setActiveTab('explorer');
+    setLocalFileName(null);
+    setIsPipelineOpen(false);
     toast.success(`Successfully processed ${newDoc.name}.`);
+  };
+
+  const handleCancel = () => {
+    setLocalFileName(null);
+    setIsPipelineOpen(false);
   };
 
   return (
@@ -34,20 +41,35 @@ export default function App() {
       <main className="flex-1 overflow-hidden relative">
         <ScrollArea className="h-full">
           <div className="p-8 max-w-7xl mx-auto">
-            {activeTab === 'explorer' ? (
-              <ReformExplorer 
-                documents={documents} 
-                onAddProposal={() => setActiveTab('pipeline')} 
-              />
-            ) : (
-              <Pipeline 
-                onComplete={handlePipelineComplete} 
-                onCancel={() => setActiveTab('explorer')} 
-              />
-            )}
+            <ReformExplorer 
+              documents={documents} 
+              onAddProposal={() => {
+                setLocalFileName(null);
+                setIsPipelineOpen(true);
+              }} 
+              onStartLocalExtraction={(fileName) => {
+                setLocalFileName(fileName);
+                setIsPipelineOpen(true);
+              }}
+            />
           </div>
         </ScrollArea>
       </main>
+
+      {/* Extraction Popup Modal */}
+      {isPipelineOpen && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-white border border-zinc-200 rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] text-zinc-900 animate-in zoom-in-95 duration-200">
+            <div className="flex-1 overflow-y-auto p-6">
+              <Pipeline 
+                localFileName={localFileName}
+                onComplete={handlePipelineComplete} 
+                onCancel={handleCancel} 
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       <Toaster position="bottom-right" />
     </div>

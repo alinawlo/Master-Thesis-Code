@@ -148,8 +148,12 @@ class DigitalReformAnalyst:
             # 3. Categorize
             prop['category'] = self.categorize(prop)
             
-            # 4. Assess Status (Phase 3 trigger)
-            prop = self.assess_status(prop)
+            # 4. Assess Status (Phase 3 trigger - Disabled for now)
+            prop.update({
+                'status': 'Unknown',
+                'progress_score': 0,
+                'evidence': 'Status monitoring is disabled.'
+            })
             results.append(prop)
             
         # Final Output Constraint: Structured JSON
