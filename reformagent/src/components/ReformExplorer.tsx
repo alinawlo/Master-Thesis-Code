@@ -15,7 +15,12 @@ import {
   Activity,
   Globe,
   Loader2,
-  Trash2
+  Trash2,
+  X,
+  ExternalLink,
+  Square,
+  CheckSquare,
+  Check
 } from 'lucide-react';
 import { 
   Card, 
@@ -94,6 +99,12 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
   const [isScraping, setIsScraping] = useState(false);
   const [localFiles, setLocalFiles] = useState<string[]>([]);
   const [proposals, setProposals] = useState<any[]>([]);
+  
+  const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
+  const [isDiscoveryModalOpen, setIsDiscoveryModalOpen] = useState(false);
+  const [discoveredDocs, setDiscoveredDocs] = useState<any[]>([]);
+  const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [isDownloading, setIsDownloading] = useState(false);
 
   const loadLocalFiles = async () => {
     try {
@@ -172,24 +183,99 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
            p.category.toLowerCase().includes(searchTerm.toLowerCase());
   });
 
-  const runWebDiscovery = async () => {
+  const handleStartSearch = (category: string) => {
+    setSelectedCategory(category);
+    runWebDiscovery(category);
+  };
+
+  const runWebDiscovery = async (category: string) => {
+    setIsCategoryModalOpen(false);
     setIsScraping(true);
-    const toastId = toast.loading("Scanning German digital policy sites via Tavily & downloading new PDFs...");
+    const toastId = toast.loading(`Scanning Tavily for "${category}" documents...`);
     try {
-      const response = await fetch('/webhook/discover-reforms', {
-        method: 'POST'
-      });
+      const response = await fetch(`/api/search-documents?category=${encodeURIComponent(category)}`);
       if (!response.ok) {
-        throw new Error("n8n discovery failed");
+        throw new Error("Tavily search failed");
       }
       const data = await response.json();
-      const count = Array.isArray(data) ? data.length : 0;
-      toast.success(`Success: Discovered and downloaded ${count} new documents!`, { id: toastId });
-      loadLocalFiles();
+      
+      let dataToParse = data;
+      if (Array.isArray(data) && data.length > 0 && data[0].output) {
+        dataToParse = data[0].output;
+      } else if (data && data.output) {
+        dataToParse = data.output;
+      }
+      
+      let parsedData = dataToParse;
+      if (typeof dataToParse === 'string') {
+        try {
+          const cleanText = dataToParse.replace(/```json/g, '').replace(/```/g, '').trim();
+          parsedData = JSON.parse(cleanText);
+        } catch (e) {
+          console.error("Failed to parse string output from n8n:", e);
+        }
+      }
+      
+      let docsList: any[] = [];
+      if (Array.isArray(parsedData)) {
+        docsList = parsedData;
+      } else if (parsedData && Array.isArray(parsedData.documents)) {
+        docsList = parsedData.documents;
+      } else if (parsedData && typeof parsedData === 'object') {
+        docsList = Object.values(parsedData).filter(v => typeof v === 'object' && v !== null);
+      }
+      
+      const formattedDocs = docsList.map((doc: any, index: number) => ({
+        id: doc.id || `doc_${index}_${Date.now()}`,
+        title: doc.title || doc.fileName || `Document ${index + 1}`,
+        url: doc.url || doc.pdfUrl || doc.link || '',
+        description: doc.description || doc.snippet || 'No description available.',
+        selected: false
+      }));
+
+      if (formattedDocs.length === 0) {
+        toast.info("No documents found for this category.", { id: toastId });
+        return;
+      }
+
+      setDiscoveredDocs(formattedDocs);
+      setIsDiscoveryModalOpen(true);
+      toast.success(`Found ${formattedDocs.length} documents!`, { id: toastId });
     } catch (e) {
       toast.error("Error during web discovery: " + e, { id: toastId });
     } finally {
       setIsScraping(false);
+    }
+  };
+
+  const downloadSelectedDocuments = async () => {
+    const selected = discoveredDocs.filter(doc => doc.selected);
+    if (selected.length === 0) {
+      toast.error("Please select at least one document to download.");
+      return;
+    }
+    
+    setIsDownloading(true);
+    const toastId = toast.loading(`Downloading ${selected.length} selected document(s)...`);
+    try {
+      const response = await fetch('/api/download-selected-pdfs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documents: selected })
+      });
+      
+      if (!response.ok) {
+        throw new Error("Failed to download documents.");
+      }
+      
+      const result = await response.json();
+      toast.success(`Successfully downloaded ${result.successCount} documents!`, { id: toastId });
+      setIsDiscoveryModalOpen(false);
+      loadLocalFiles();
+    } catch (e) {
+      toast.error("Error during download: " + e, { id: toastId });
+    } finally {
+      setIsDownloading(false);
     }
   };
 
@@ -203,7 +289,7 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
           <Button 
             variant="outline" 
             size="sm" 
-            onClick={runWebDiscovery} 
+            onClick={() => setIsCategoryModalOpen(true)} 
             disabled={isScraping}
           >
             {isScraping ? (
@@ -440,6 +526,203 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
           </div>
         </CardContent>
       </Card>
+
+      {/* Category Selection Modal */}
+      {isCategoryModalOpen && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-[0_4px_12px_rgba(0,0,0,0.1)] w-full max-w-md overflow-hidden text-zinc-900 border-0">
+            <div className="p-6 border-b border-zinc-100 flex items-center justify-between">
+              <h3 className="text-lg font-bold">Select Category for Discovery</h3>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="h-8 w-8 p-0 rounded-lg"
+                onClick={() => setIsCategoryModalOpen(false)}
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+            <div className="p-6 grid grid-cols-1 gap-2 max-h-[350px] overflow-y-auto">
+              {[
+                "IT-Infrastruktur",
+                "Organisation",
+                "Strategie",
+                "Personal",
+                "Gesetzgebung",
+                "Leistungen & Prozesse",
+                "Föderalismus",
+                "Governance",
+                "Random"
+              ].map((category) => (
+                <button
+                  key={category}
+                  className="w-full text-left px-4 py-3 rounded-lg hover:bg-zinc-50 border border-zinc-100 hover:border-zinc-200 transition-all font-medium text-sm flex items-center justify-between group"
+                  onClick={() => handleStartSearch(category)}
+                >
+                  <span>{category}</span>
+                  <ChevronRight className="w-4 h-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform" />
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Document Discovery Preview Modal */}
+      {isDiscoveryModalOpen && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-[0_4px_12px_rgba(0,0,0,0.1)] w-full max-w-3xl h-[80vh] flex flex-col text-zinc-900 border-0">
+            {/* Modal Header */}
+            <div className="p-6 border-b border-zinc-100 flex items-center justify-between shrink-0">
+              <div>
+                <h3 className="text-lg font-bold">Retrieved Policy Documents</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">Category: {selectedCategory} • Select documents to download into the repository</p>
+              </div>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="h-8 w-8 p-0 rounded-lg"
+                onClick={() => setIsDiscoveryModalOpen(false)}
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {discoveredDocs.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-muted-foreground py-12">
+                  <FileText className="w-12 h-12 mb-3 opacity-40" />
+                  <p>All discovered documents have been deleted or skipped.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {discoveredDocs.map((doc) => (
+                    <div 
+                      key={doc.id} 
+                      className={`p-4 border rounded-xl transition-all flex items-start justify-between gap-4 ${
+                        doc.selected ? 'border-zinc-200 bg-white shadow-sm' : 'border-zinc-100 bg-zinc-50/50 opacity-60'
+                      }`}
+                    >
+                      {/* Checkbox and Text */}
+                      <div className="flex items-start gap-3 flex-1 min-w-0">
+                        <button
+                          className="mt-1 shrink-0 text-zinc-400 hover:text-zinc-600 transition-colors"
+                          onClick={() => {
+                            setDiscoveredDocs(prev => prev.map(d => d.id === doc.id ? { ...d, selected: !d.selected } : d));
+                          }}
+                        >
+                          {doc.selected ? (
+                            <CheckSquare className="w-5 h-5 text-primary" />
+                          ) : (
+                            <Square className="w-5 h-5" />
+                          )}
+                        </button>
+                        <div className="min-w-0">
+                          <h4 className="font-semibold text-sm truncate pr-2 text-zinc-900" title={doc.title}>
+                            {doc.title}
+                          </h4>
+                          <p className="text-xs text-muted-foreground mt-1 line-clamp-2 leading-relaxed">
+                            {doc.description}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-1 shrink-0">
+                         {doc.url && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className={`h-8 px-2.5 rounded-lg text-xs transition-colors ${
+                              doc.visited 
+                                ? 'text-green-600 bg-green-50 hover:bg-green-100 font-semibold' 
+                                : 'text-zinc-600 hover:bg-zinc-100'
+                            }`}
+                            onClick={() => {
+                              window.open(doc.url.startsWith('http') ? doc.url : `https://${doc.url}`, '_blank');
+                              setDiscoveredDocs(prev => prev.map(d => d.id === doc.id ? { ...d, visited: true } : d));
+                            }}
+                            title="Visit document website"
+                          >
+                            {doc.visited ? (
+                              <>
+                                <Check className="w-4 h-4 mr-1.5" /> Visited
+                              </>
+                            ) : (
+                              <>
+                                <ExternalLink className="w-4 h-4 mr-1.5" /> Visit Site
+                              </>
+                            )}
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg"
+                          onClick={() => {
+                            setDiscoveredDocs(prev => prev.filter(d => d.id !== doc.id));
+                          }}
+                          title="Remove document from search"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-6 border-t border-zinc-100 flex items-center justify-between shrink-0 bg-zinc-50/50">
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground font-medium">
+                  Selected: {discoveredDocs.filter(d => d.selected).length} of {discoveredDocs.length}
+                </span>
+                {discoveredDocs.length > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 text-xs text-primary hover:text-primary-hover px-2 rounded-lg"
+                    onClick={() => {
+                      const allSelected = discoveredDocs.every(d => d.selected);
+                      setDiscoveredDocs(prev => prev.map(d => ({ ...d, selected: !allSelected })));
+                    }}
+                  >
+                    {discoveredDocs.every(d => d.selected) ? "Clear Selection" : "Select All"}
+                  </Button>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={() => setIsDiscoveryModalOpen(false)}
+                  disabled={isDownloading}
+                >
+                  Cancel
+                </Button>
+                <Button 
+                  size="sm" 
+                  onClick={downloadSelectedDocuments}
+                  disabled={isDownloading || discoveredDocs.filter(d => d.selected).length === 0}
+                >
+                  {isDownloading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Downloading...
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-4 h-4 mr-2" /> Download Selected
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

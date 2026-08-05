@@ -11,7 +11,7 @@ export default defineConfig({
     {
       name: 'save-csv-middleware',
       configureServer(server) {
-        server.middlewares.use((req, res, next) => {
+        server.middlewares.use(async (req, res, next) => {
           // Helper function to rebuild master CSV
           const rebuildMasterCsv = () => {
             const csvsDir = path.resolve(__dirname, './csvs');
@@ -320,6 +320,108 @@ export default defineConfig({
                     'Content-Disposition': `attachment; filename="reforms_${fileName.replace('.pdf', '')}.csv"`
                   });
                   res.end(Buffer.from(arrayBuffer));
+                } catch (err: any) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: err.message }));
+                }
+              });
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          } else if (req.url.startsWith('/api/search-documents') && req.method === 'GET') {
+            try {
+              const category = new URL(req.url, 'http://localhost').searchParams.get('category') || 'Random';
+              const n8nRes = await fetch(`http://localhost:5678/webhook/discover-reforms?category=${encodeURIComponent(category)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ category })
+              });
+
+              if (!n8nRes.ok) {
+                throw new Error(`n8n search failed: ${n8nRes.statusText}`);
+              }
+
+              const data = await n8nRes.json();
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(data));
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          } else if (req.url === '/api/download-selected-pdfs' && req.method === 'POST') {
+            try {
+              let body = '';
+              req.on('data', chunk => {
+                body += chunk.toString();
+              });
+              req.on('end', async () => {
+                try {
+                  const { documents } = JSON.parse(body);
+                  if (!Array.isArray(documents)) {
+                    throw new Error('documents array is required.');
+                  }
+                  
+                  let successCount = 0;
+                  const filesDir = '/Users/ali/Desktop/Master Thesis/files';
+                  if (!fs.existsSync(filesDir)) {
+                    fs.mkdirSync(filesDir, { recursive: true });
+                  }
+
+                  for (const doc of documents) {
+                    try {
+                      if (!doc.url) continue;
+                      
+                      // Emulate browser request headers to avoid Cloudflare/firewall blocks
+                      const downloadRes = await fetch(doc.url, {
+                        headers: {
+                          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                          'Accept': 'application/pdf,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                          'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+                          'Cache-Control': 'no-cache',
+                          'Pragma': 'no-cache'
+                        }
+                      });
+
+                      if (!downloadRes.ok) {
+                        console.error(`Failed to download ${doc.url}: ${downloadRes.status} ${downloadRes.statusText}`);
+                        continue;
+                      }
+
+                      // Verify it is not an HTML page
+                      const contentType = downloadRes.headers.get('content-type') || '';
+                      if (contentType.toLowerCase().includes('text/html')) {
+                        console.warn(`Skipping download from ${doc.url} because it resolved to a webpage (HTML), not a PDF.`);
+                        continue;
+                      }
+                      
+                      const arrayBuffer = await downloadRes.arrayBuffer();
+                      let baseName = doc.title || 'downloaded_doc';
+                      let cleanName = baseName
+                        .toLowerCase()
+                        .replace(/[^a-z0-9_]+/g, '_')
+                        .replace(/^_+|_+$/g, '');
+                      if (!cleanName) cleanName = 'document';
+
+                      let cleanFileName = `${cleanName}.pdf`;
+                      let filePath = path.join(filesDir, cleanFileName);
+
+                      let counter = 1;
+                      while (fs.existsSync(filePath)) {
+                        cleanFileName = `${cleanName}_${counter}.pdf`;
+                        filePath = path.join(filesDir, cleanFileName);
+                        counter++;
+                      }
+
+                      fs.writeFileSync(filePath, Buffer.from(arrayBuffer));
+                      successCount++;
+                    } catch (downloadErr: any) {
+                      console.error(`Error downloading document from ${doc.url}:`, downloadErr.message);
+                    }
+                  }
+
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ success: true, successCount }));
                 } catch (err: any) {
                   res.writeHead(400, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ error: err.message }));
