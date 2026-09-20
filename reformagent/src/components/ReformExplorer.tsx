@@ -178,9 +178,10 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
   }, [documents]);
 
   const filteredProposals = proposals.filter(p => {
-    return p.text.toLowerCase().includes(searchTerm.toLowerCase()) || 
-           p.source.toLowerCase().includes(searchTerm.toLowerCase()) ||
-           p.category.toLowerCase().includes(searchTerm.toLowerCase());
+    return (p.text || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
+           (p.verbatim || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+           (p.source || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+           (p.category || '').toLowerCase().includes(searchTerm.toLowerCase());
   });
 
   const handleStartSearch = (category: string) => {
@@ -414,6 +415,7 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
               <TableHeader>
                 <TableRow className="hover:bg-transparent border-b border-border/50">
                   <TableHead className="col-header">Proposal</TableHead>
+                  <TableHead className="col-header">Exact Verbatim</TableHead>
                   <TableHead className="col-header">Category</TableHead>
                   <TableHead className="col-header">Source Document (Quelldokument)</TableHead>
                   <TableHead className="col-header text-center">Page</TableHead>
@@ -425,7 +427,7 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                 <AnimatePresence mode="popLayout">
                   {filteredProposals.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={6} className="text-center py-12 text-muted-foreground italic">
+                      <TableCell colSpan={7} className="text-center py-12 text-muted-foreground italic">
                         No proposals found. Click "Discover New Documents" or "New Extraction" to start.
                       </TableCell>
                     </TableRow>
@@ -442,6 +444,11 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                         <TableCell className="py-4 max-w-md whitespace-normal break-words">
                           <p className="text-xs leading-relaxed font-medium">
                             {proposal.text}
+                          </p>
+                        </TableCell>
+                        <TableCell className="py-4 max-w-md whitespace-normal break-words text-muted-foreground italic">
+                          <p className="text-xs leading-relaxed">
+                            {proposal.verbatim || "N/A"}
                           </p>
                         </TableCell>
                         <TableCell className="align-middle whitespace-normal">

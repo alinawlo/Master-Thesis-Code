@@ -16,7 +16,7 @@ export default defineConfig({
           const rebuildMasterCsv = () => {
             const csvsDir = path.resolve(__dirname, './csvs');
             const masterFile = '/Users/ali/Desktop/Master Thesis/files/extracted_reforms_database.csv';
-            let masterContent = '"Exakte Quotierung des Empfehlungssatzes",Quelldokument,Seitennummer,Kategorie\n';
+            let masterContent = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n';
             
             if (fs.existsSync(csvsDir)) {
               const files = fs.readdirSync(csvsDir);
@@ -142,12 +142,14 @@ export default defineConfig({
                       for (let k = 1; k < csvData.length; k++) {
                         const row = csvData[k];
                         const text = row[0] || '';
+                        const verbatim = row[1] || '';
                         
                         // 2. Read the LLM-extracted value from the CSV row (e.g. www.vitako.de)
-                        const llmSource = (row[1] || '').trim();
+                        const llmSource = (row[2] || '').trim();
                         
-                        const page = row[2] || '';
-                        const category = row[3] || 'Sonstiges';
+                        const page = row[3] || '';
+                        const category = row[4] || 'Sonstiges';
+                        const csvProcessedAt = row[5] || processedAt;
                         
                         // 3. Combine: "filename.pdf (extracted_url)"
                         let sourceText = pdfName;
@@ -158,11 +160,12 @@ export default defineConfig({
                         proposals.push({
                           id: `${file}_${k}`,
                           text,
+                          verbatim,
                           source: sourceText,
                           sourceUrl: (llmSource && llmSource.includes('.') && llmSource !== 'unknown_document.pdf') ? llmSource : '',
                           page,
                           category,
-                          processedAt
+                          processedAt: csvProcessedAt
                         });
                       }
                     }
@@ -184,7 +187,7 @@ export default defineConfig({
               const filePath = '/Users/ali/Desktop/Master Thesis/files/extracted_reforms_database.csv';
               if (!fs.existsSync(filePath)) {
                 res.writeHead(200, { 'Content-Type': 'text/csv' });
-                res.end('"Exakte Quotierung des Empfehlungssatzes",Quelldokument,Seitennummer,Kategorie\n');
+                res.end('Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n');
                 return;
               }
               const fileContent = fs.readFileSync(filePath);
@@ -272,7 +275,7 @@ export default defineConfig({
               }
               
               const masterFile = '/Users/ali/Desktop/Master Thesis/files/extracted_reforms_database.csv';
-              const header = '"Exakte Quotierung des Empfehlungssatzes",Quelldokument,Seitennummer,Kategorie\n';
+              const header = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n';
               fs.writeFileSync(masterFile, header, 'utf8');
               
               res.writeHead(200, { 'Content-Type': 'application/json' });
