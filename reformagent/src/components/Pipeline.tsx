@@ -13,7 +13,8 @@ import {
   Database,
   ShieldCheck,
   Activity,
-  Download
+  Download,
+  AlertTriangle
 } from 'lucide-react';
 import { 
   Card, 
@@ -31,14 +32,18 @@ import { Badge } from '@/src/components/ui/badge';
 import { Separator } from '@/src/components/ui/separator';
 import { PipelineStep, ProcessedDocument } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
+import { toast } from 'sonner';
+import DeduplicationReview, { DeduplicationDecision } from './DeduplicationReview';
+import { DuplicateMatch, Proposal, parseCsvLine } from '../types/deduplication';
 
 interface PipelineProps {
   localFileName: string | null;
   onComplete: (doc: ProcessedDocument) => void;
   onCancel: () => void;
+  onDocumentProcessed?: (docName: string) => void;
 }
 
-export default function Pipeline({ localFileName, onComplete, onCancel }: PipelineProps) {
+export default function Pipeline({ localFileName, onComplete, onCancel, onDocumentProcessed }: PipelineProps) {
   const [step, setStep] = useState<PipelineStep>('upload');
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -47,6 +52,12 @@ export default function Pipeline({ localFileName, onComplete, onCancel }: Pipeli
   const [csvBlob, setCsvBlob] = useState<Blob | null>(null);
   const [proposalCount, setProposalCount] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
+
+  // RAG Deduplication States
+  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
+  const [pendingDuplicates, setPendingDuplicates] = useState<DuplicateMatch[]>([]);
+  const [pendingUnique, setPendingUnique] = useState<Proposal[]>([]);
+  const [rawCsvText, setRawCsvText] = useState('');
 
   const addLog = (message: string) => {
     setLogs((prev: string[]) => [...prev, `[${new Date().toLocaleTimeString()}] ${message}`]);
@@ -67,6 +78,55 @@ export default function Pipeline({ localFileName, onComplete, onCancel }: Pipeli
       setSelectedFile(file);
       setStep('extract');
       addLog(`File "${file.name}" ready for processing.`);
+    }
+  };
+
+  const handleDeduplicationConfirm = async (decisions: DeduplicationDecision[]) => {
+    setIsReviewModalOpen(false);
+    const targetFileName = 'reforms_master.csv';
+    
+    const merges = decisions
+      .filter(d => d.action === 'merge')
+      .map(d => ({
+        existingFile: 'reforms_master.csv',
+        existingRowIndex: d.match.existingRowIndex,
+        incoming: d.match.incoming
+      }));
+      
+    // Only proposals explicitly marked as 'keep' are saved; untriggered/discarded ones are dropped
+    const keptAsNew = decisions
+      .filter(d => d.action === 'keep')
+      .map(d => d.match.incoming);
+      
+    const allNewProposals = [...pendingUnique, ...keptAsNew];
+    
+    addLog(`Saving ${merges.length} merged proposal(s) and ${allNewProposals.length} new proposal(s) to master database...`);
+    
+    try {
+      const saveResponse = await fetch('/api/save-csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: targetFileName,
+          newProposals: allNewProposals,
+          merges: merges
+        })
+      });
+      
+      if (saveResponse.ok) {
+        addLog("Success: Deduplication choices saved and master CSV updated.");
+        toast.success(`Saved ${allNewProposals.length} new proposals and merged ${merges.length} sources.`);
+        setProposalCount(allNewProposals.length + merges.length);
+        if (onDocumentProcessed) onDocumentProcessed(fileName);
+        setStep('results');
+      } else {
+        const errJson = await saveResponse.json();
+        addLog(`Error saving proposals: ${errJson.error}`);
+        toast.error(`Failed to save proposals: ${errJson.error}`);
+      }
+    } catch (err: any) {
+      addLog(`Error during save: ${err.message}`);
+      toast.error(`Error saving: ${err.message}`);
     }
   };
 
@@ -102,6 +162,14 @@ export default function Pipeline({ localFileName, onComplete, onCancel }: Pipeli
         });
       }
 
+      if (response.status === 409) {
+        const errJson = await response.json();
+        addLog(`Duplicate Document Blocked: ${errJson.error}`);
+        toast.warning(errJson.error, { duration: 6000 });
+        setIsProcessing(false);
+        return;
+      }
+
       if (!response.ok) {
         throw new Error(`n8n extraction failed: ${response.statusText}`);
       }
@@ -109,43 +177,123 @@ export default function Pipeline({ localFileName, onComplete, onCancel }: Pipeli
       const blob = await response.blob();
       setCsvBlob(blob);
       addLog("n8n: CSV data generated successfully.");
-      setProgress(100);
-      setStep('results');
+      setProgress(75);
 
-      // Parse CSV to get proposal count and save it to the local directory
+      if (selectedFile) {
+        try {
+          await fetch('/api/record-processed-document', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fileName: selectedFile.name })
+          });
+        } catch (recErr) {
+          console.error("Failed to record processed document:", recErr);
+        }
+      }
+
+      if (onDocumentProcessed) {
+        onDocumentProcessed(localFileName || (selectedFile ? selectedFile.name : ''));
+      }
+
+      // Parse CSV to structured proposals
       try {
         const text = await blob.text();
+        setRawCsvText(text);
         const lines = text.trim().split('\n');
         const nonHeaderLines = lines.filter(line => line.trim().length > 0);
-        const count = nonHeaderLines.length > 1 ? nonHeaderLines.length - 1 : 0;
-        setProposalCount(count);
-        addLog(`Parsed CSV: Found ${count} proposals.`);
+        
+        const parsedProposals: Proposal[] = [];
+        const currentDocName = localFileName || (selectedFile ? selectedFile.name : 'document.pdf');
 
-        // Call the custom middleware to save a copy in local csvs/ directory
-        addLog("Requesting local server to save a copy under 'csvs/'...");
+        for (let i = 1; i < nonHeaderLines.length; i++) {
+          const row = parseCsvLine(nonHeaderLines[i]);
+          if (row.length >= 4) {
+            const rawSource = (row[2] || '').trim();
+            let quelldokument = currentDocName;
+            if (rawSource && rawSource !== currentDocName && rawSource !== 'unknown_document.pdf') {
+              quelldokument = `${currentDocName} (${rawSource})`;
+            }
+
+            parsedProposals.push({
+              vorschlag: (row[0] || '').trim(),
+              verbatim: (row[1] || '').trim(),
+              quelldokument,
+              seitennummer: (row[3] || '').trim(),
+              kategorie: (row[4] || 'Sonstiges').trim(),
+              verarbeitungsdatum: (row[5] || new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })).trim()
+            });
+          }
+        }
+
+        const count = parsedProposals.length;
+        setProposalCount(count);
+        addLog(`Parsed CSV: Found ${count} proposal(s).`);
+
+        if (count === 0) {
+          setProgress(100);
+          setStep('results');
+          return;
+        }
+
+        // Run RAG Semantic Deduplication check
+        addLog("Running RAG semantic similarity check against master database...");
+        setProgress(85);
+
+        const dedupRes = await fetch('/api/check-duplicates', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ proposals: parsedProposals, threshold: 0.85 })
+        });
+
+        setProgress(100);
+
+        if (dedupRes.ok) {
+          const dedupData = await dedupRes.json();
+          const duplicates: DuplicateMatch[] = dedupData.duplicates || [];
+          const unique: Proposal[] = dedupData.unique || [];
+
+          if (duplicates.length > 0) {
+            addLog(`RAG Analysis: Found ${duplicates.length} semantic duplicate(s) and ${unique.length} unique proposal(s).`);
+            setPendingDuplicates(duplicates);
+            setPendingUnique(unique);
+            setIsReviewModalOpen(true);
+            // Wait for user modal decision
+            return;
+          } else {
+            addLog("RAG Analysis: All extracted proposals are unique.");
+          }
+        } else {
+          addLog("Warning: Deduplication service returned an error, proceeding with standard save.");
+        }
+
+        // No duplicates: save directly to reforms_master.csv
+        addLog("Saving proposals to master database (reforms_master.csv)...");
+        const targetFileName = 'reforms_master.csv';
         const saveResponse = await fetch('/api/save-csv', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            fileName: `reforms_${(localFileName || selectedFile!.name).replace('.pdf', '')}.csv`,
-            content: text
+            fileName: targetFileName,
+            newProposals: parsedProposals
           })
         });
 
         if (saveResponse.ok) {
-          addLog("Success: Saved CSV copy locally under csvs/ folder.");
+          addLog("Success: Saved proposals to reforms_master.csv and updated thesis database.");
+          if (onDocumentProcessed) onDocumentProcessed(fileName);
+          setStep('results');
         } else {
           const errJson = await saveResponse.json();
-          addLog(`Warning: Local server failed to save CSV: ${errJson.error}`);
+          addLog(`Warning: Failed to save proposals: ${errJson.error}`);
         }
       } catch (innerErr) {
         addLog(`Warning: Failed during CSV analysis or local storage: ${innerErr}`);
       }
 
     } catch (error) {
-      addLog(`Error during n8n extraction: ${error}`);
+      addLog(`Error during extraction: ${error}`);
     } finally {
       setIsProcessing(false);
     }
@@ -340,6 +488,17 @@ export default function Pipeline({ localFileName, onComplete, onCancel }: Pipeli
           </Card>
         </div>
       </div>
+
+      <DeduplicationReview
+        isOpen={isReviewModalOpen}
+        onClose={() => {
+          setIsReviewModalOpen(false);
+          setIsProcessing(false);
+        }}
+        duplicates={pendingDuplicates}
+        uniqueProposals={pendingUnique}
+        onConfirm={handleDeduplicationConfirm}
+      />
     </div>
   );
 }

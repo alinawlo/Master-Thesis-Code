@@ -22,17 +22,24 @@ export default function App() {
   const [documents, setDocuments] = useState<ProcessedDocument[]>([]);
   const [localFileName, setLocalFileName] = useState<string | null>(null);
   const [isPipelineOpen, setIsPipelineOpen] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  const triggerRefresh = () => {
+    setRefreshTrigger((prev) => prev + 1);
+  };
 
   const handlePipelineComplete = (newDoc: ProcessedDocument) => {
     setDocuments((prev) => [...prev, newDoc]);
     setLocalFileName(null);
     setIsPipelineOpen(false);
+    triggerRefresh();
     toast.success(`Successfully processed ${newDoc.name}.`);
   };
 
   const handleCancel = () => {
     setLocalFileName(null);
     setIsPipelineOpen(false);
+    triggerRefresh();
   };
 
   return (
@@ -43,6 +50,7 @@ export default function App() {
           <div className="p-8 max-w-7xl mx-auto">
             <ReformExplorer 
               documents={documents} 
+              refreshTrigger={refreshTrigger}
               onAddProposal={() => {
                 setLocalFileName(null);
                 setIsPipelineOpen(true);
@@ -65,6 +73,7 @@ export default function App() {
                 localFileName={localFileName}
                 onComplete={handlePipelineComplete} 
                 onCancel={handleCancel} 
+                onDocumentProcessed={triggerRefresh}
               />
             </div>
           </div>

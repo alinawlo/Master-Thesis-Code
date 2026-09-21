@@ -3,6 +3,15 @@ import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 import tailwindcss from "@tailwindcss/vite"
 import fs from "fs"
+import crypto from "crypto"
+import { 
+  checkDuplicates, 
+  mergeProposalRow, 
+  escapeCsvField, 
+  parseCsvLine, 
+  loadProcessedHashes, 
+  saveProcessedHashes 
+} from "./src/server/ragDeduplication"
 
 export default defineConfig({
   plugins: [
@@ -14,33 +23,50 @@ export default defineConfig({
         server.middlewares.use(async (req, res, next) => {
           // Helper function to rebuild master CSV
           const rebuildMasterCsv = () => {
-            const csvsDir = path.resolve(__dirname, './csvs');
+            const masterSource = path.resolve(__dirname, './csvs/reforms_master.csv');
             const masterFile = '/Users/ali/Desktop/Master Thesis/files/extracted_reforms_database.csv';
-            let masterContent = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n';
+            const header = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n';
             
-            if (fs.existsSync(csvsDir)) {
-              const files = fs.readdirSync(csvsDir);
-              for (const file of files) {
-                if (path.extname(file).toLowerCase() === '.csv') {
-                  const individualContent = fs.readFileSync(path.join(csvsDir, file), 'utf8');
-                  const individualLines = individualContent.split('\n');
-                  for (let idx = 1; idx < individualLines.length; idx++) {
-                    const line = individualLines[idx].trim();
-                    if (line) {
-                      masterContent += line + '\n';
-                    }
-                  }
-                }
-              }
+            if (!fs.existsSync(masterSource)) {
+              fs.writeFileSync(masterSource, header, 'utf8');
             }
             const masterDir = path.dirname(masterFile);
             if (!fs.existsSync(masterDir)) {
               fs.mkdirSync(masterDir, { recursive: true });
             }
-            fs.writeFileSync(masterFile, masterContent, 'utf8');
+            fs.copyFileSync(masterSource, masterFile);
           };
 
-          if (req.url === '/api/save-csv' && req.method === 'POST') {
+          if (req.url === '/api/check-duplicates' && req.method === 'POST') {
+            try {
+              let body = '';
+              req.on('data', chunk => {
+                body += chunk.toString();
+              });
+              req.on('end', async () => {
+                try {
+                  const { proposals, threshold } = JSON.parse(body);
+                  if (!Array.isArray(proposals)) {
+                    throw new Error('proposals array is required.');
+                  }
+                  const csvsDir = path.resolve(__dirname, './csvs');
+                  const result = await checkDuplicates(proposals, csvsDir, threshold || 0.85);
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ 
+                    success: true, 
+                    duplicates: result.duplicates, 
+                    unique: result.unique 
+                  }));
+                } catch (err: any) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: err.message }));
+                }
+              });
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          } else if (req.url === '/api/save-csv' && req.method === 'POST') {
             try {
               let body = '';
               req.on('data', chunk => {
@@ -48,22 +74,78 @@ export default defineConfig({
               });
               req.on('end', () => {
                 try {
-                  const { fileName, content } = JSON.parse(body);
-                  if (!fileName || typeof content !== 'string') {
-                    throw new Error('Invalid payload: fileName and content are required.');
-                  }
+                  const payload = JSON.parse(body);
                   const csvsDir = path.resolve(__dirname, './csvs');
                   if (!fs.existsSync(csvsDir)) {
                     fs.mkdirSync(csvsDir, { recursive: true });
                   }
-                  const filePath = path.join(csvsDir, fileName);
-                  fs.writeFileSync(filePath, content, 'utf8');
+                  const masterPath = path.join(csvsDir, 'reforms_master.csv');
+                  if (!fs.existsSync(masterPath)) {
+                    fs.writeFileSync(masterPath, 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n', 'utf8');
+                  }
+
+                  // 1. Process merges if any in reforms_master.csv
+                  if (Array.isArray(payload.merges) && payload.merges.length > 0) {
+                    const fileContent = fs.readFileSync(masterPath, 'utf8');
+                    const lines = fileContent.split('\n');
+                    let currentDataRow = 0;
+                    const updatedLines: string[] = [];
+
+                    const mergeMap = new Map<number, any>();
+                    for (const m of payload.merges) {
+                      mergeMap.set(Number(m.existingRowIndex), m.incoming);
+                    }
+
+                    for (let i = 0; i < lines.length; i++) {
+                      const line = lines[i].trim();
+                      if (!line) continue;
+                      if (i === 0) {
+                        updatedLines.push(lines[i]);
+                        continue;
+                      }
+                      currentDataRow++;
+                      if (mergeMap.has(currentDataRow)) {
+                        const incoming = mergeMap.get(currentDataRow);
+                        const existingRow = parseCsvLine(line);
+                        const updatedRow = mergeProposalRow(existingRow, {
+                          verbatim: incoming.verbatim,
+                          quelldokument: incoming.quelldokument,
+                          seitennummer: incoming.seitennummer,
+                          verarbeitungsdatum: incoming.verarbeitungsdatum
+                        });
+                        updatedLines.push(updatedRow.map(escapeCsvField).join(','));
+                      } else {
+                        updatedLines.push(lines[i]);
+                      }
+                    }
+                    fs.writeFileSync(masterPath, updatedLines.join('\n') + '\n', 'utf8');
+                  }
+
+                  // 2. Process new proposals: append to reforms_master.csv
+                  if (Array.isArray(payload.newProposals) && payload.newProposals.length > 0) {
+                    let appendContent = '';
+                    for (const prop of payload.newProposals) {
+                      const row = [
+                        prop.vorschlag,
+                        prop.verbatim,
+                        prop.quelldokument,
+                        prop.seitennummer,
+                        prop.kategorie,
+                        prop.verarbeitungsdatum
+                      ];
+                      appendContent += row.map(escapeCsvField).join(',') + '\n';
+                    }
+                    fs.appendFileSync(masterPath, appendContent, 'utf8');
+                  } else if (payload.content && typeof payload.content === 'string') {
+                    // Fallback direct content writing
+                    fs.writeFileSync(masterPath, payload.content, 'utf8');
+                  }
                   
-                  // Rebuild master CSV to include the newly saved file
+                  // Rebuild master copy in Thesis folder
                   rebuildMasterCsv();
                   
                   res.writeHead(200, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ success: true, path: filePath }));
+                  res.end(JSON.stringify({ success: true }));
                 } catch (err: any) {
                   res.writeHead(400, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ error: err.message }));
@@ -81,8 +163,28 @@ export default defineConfig({
                 res.end(JSON.stringify([]));
                 return;
               }
+              const csvsDir = path.resolve(__dirname, './csvs');
+              const processedHashes = loadProcessedHashes(csvsDir);
+              const processedFileNames = new Set(Object.values(processedHashes).map(p => p.fileName));
+              const processedDir = path.join(filesDir, 'processed files');
+              if (fs.existsSync(processedDir)) {
+                try {
+                  const pFiles = fs.readdirSync(processedDir);
+                  pFiles.forEach(f => processedFileNames.add(f));
+                } catch {}
+              }
+
               const files = fs.readdirSync(filesDir);
-              const pdfs = files.filter(file => path.extname(file).toLowerCase() === '.pdf');
+              const pdfs = files.filter(file => {
+                const fullPath = path.join(filesDir, file);
+                try {
+                  return fs.statSync(fullPath).isFile() && 
+                         path.extname(file).toLowerCase() === '.pdf' &&
+                         !processedFileNames.has(file);
+                } catch {
+                  return false;
+                }
+              });
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(pdfs));
             } catch (err: any) {
@@ -92,92 +194,227 @@ export default defineConfig({
           } else if (req.url === '/api/list-proposals' && req.method === 'GET') {
             try {
               const csvsDir = path.resolve(__dirname, './csvs');
-              const urlsFile = '/Users/ali/Desktop/Master Thesis/files/downloaded_urls.txt';
-              
-              let urls: string[] = [];
-              if (fs.existsSync(urlsFile)) {
-                const urlsContent = fs.readFileSync(urlsFile, 'utf8');
-                urls = urlsContent.split('\n').filter(Boolean);
-              }
-              
+              const masterPath = path.join(csvsDir, 'reforms_master.csv');
               const proposals: any[] = [];
-              if (fs.existsSync(csvsDir)) {
-                const files = fs.readdirSync(csvsDir);
-                for (const file of files) {
-                  if (path.extname(file).toLowerCase() === '.csv') {
-                    const filePath = path.join(csvsDir, file);
-                    const processedAt = fs.statSync(filePath).mtime.toLocaleString();
-                    const content = fs.readFileSync(filePath, 'utf8');
+              
+              if (fs.existsSync(masterPath)) {
+                const content = fs.readFileSync(masterPath, 'utf8');
+                const lines = content.split('\n');
+                let currentDataRow = 0;
+                
+                for (let idx = 1; idx < lines.length; idx++) {
+                  const line = lines[idx].trim();
+                  if (!line) continue;
+                  currentDataRow++;
+                  const row = parseCsvLine(line);
+                  if (row.length >= 4) {
+                    const text = row[0] || '';
+                    const verbatim = row[1] || '';
+                    const sourceText = row[2] || '';
+                    const page = row[3] || '';
+                    const category = row[4] || 'Sonstiges';
+                    const csvProcessedAt = row[5] || '';
                     
-                    // Simple CSV parser that handles double quotes
-                    const csvData: string[][] = [];
-                    const lines = content.split('\n');
-                    for (const line of lines) {
-                      const row: string[] = [];
-                      let inQuotes = false;
-                      let currentVal = '';
-                      for (let i = 0; i < line.length; i++) {
-                        const char = line[i];
-                        if (char === '"') {
-                          inQuotes = !inQuotes;
-                        } else if (char === ',' && !inQuotes) {
-                          row.push(currentVal);
-                          currentVal = '';
-                        } else {
-                          currentVal += char;
-                        }
-                      }
-                      row.push(currentVal);
-                      if (row.some(val => val.trim() !== '')) {
-                        csvData.push(row);
-                      }
-                    }
-                    
-                    if (csvData.length > 1) {
-                      const headers = csvData[0];
-                      
-                      // 1. Reconstruct the original PDF name from the CSV filename
-                      const pdfName = file.replace(/^reforms_/, '').replace(/\.csv$/, '.pdf');
-
-                      for (let k = 1; k < csvData.length; k++) {
-                        const row = csvData[k];
-                        const text = row[0] || '';
-                        const verbatim = row[1] || '';
-                        
-                        // 2. Read the LLM-extracted value from the CSV row (e.g. www.vitako.de)
-                        const llmSource = (row[2] || '').trim();
-                        
-                        const page = row[3] || '';
-                        const category = row[4] || 'Sonstiges';
-                        const csvProcessedAt = row[5] || processedAt;
-                        
-                        // 3. Combine: "filename.pdf (extracted_url)"
-                        let sourceText = pdfName;
-                        if (llmSource && llmSource !== pdfName && llmSource !== 'unknown_document.pdf') {
-                          sourceText = `${pdfName} (${llmSource})`;
-                        }
-                        
-                        proposals.push({
-                          id: `${file}_${k}`,
-                          text,
-                          verbatim,
-                          source: sourceText,
-                          sourceUrl: (llmSource && llmSource.includes('.') && llmSource !== 'unknown_document.pdf') ? llmSource : '',
-                          page,
-                          category,
-                          processedAt: csvProcessedAt
-                        });
-                      }
-                    }
+                    proposals.push({
+                      id: String(currentDataRow),
+                      text,
+                      verbatim,
+                      source: sourceText,
+                      sourceUrl: (sourceText.includes('.') && !sourceText.includes('unknown_document.pdf')) ? sourceText : '',
+                      page,
+                      category,
+                      processedAt: csvProcessedAt
+                    });
                   }
                 }
               }
               
-              // Sort by date descending
-              proposals.sort((a, b) => new Date(b.processedAt).getTime() - new Date(a.processedAt).getTime());
-              
+              // Keep the natural order as it is in reforms_master.csv
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(proposals));
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          } else if (req.url === '/api/list-processed-documents' && req.method === 'GET') {
+            try {
+              const csvsDir = path.resolve(__dirname, './csvs');
+              const processedHashes = loadProcessedHashes(csvsDir);
+              const filesDir = '/Users/ali/Desktop/Master Thesis/files';
+              const processedDir = path.join(filesDir, 'processed files');
+              if (!fs.existsSync(processedDir)) {
+                fs.mkdirSync(processedDir, { recursive: true });
+              }
+              
+              // Sync files physically in "processed files" folder into processedHashes if missing
+              if (fs.existsSync(processedDir)) {
+                const pFiles = fs.readdirSync(processedDir);
+                let cacheUpdated = false;
+                for (const pf of pFiles) {
+                  const fullPf = path.join(processedDir, pf);
+                  try {
+                    if (fs.statSync(fullPf).isFile() && path.extname(pf).toLowerCase() === '.pdf') {
+                      const alreadyHashed = Object.values(processedHashes).some(v => v.fileName === pf);
+                      if (!alreadyHashed) {
+                        const buf = fs.readFileSync(fullPf);
+                        const h = crypto.createHash('sha256').update(buf).digest('hex');
+                        const stat = fs.statSync(fullPf);
+                        processedHashes[h] = {
+                          fileName: pf,
+                          processedAt: stat.mtime.toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+                        };
+                        cacheUpdated = true;
+                      }
+                    }
+                  } catch (e) {
+                    // ignore stat error
+                  }
+                }
+                if (cacheUpdated) {
+                  saveProcessedHashes(csvsDir, processedHashes);
+                }
+              }
+
+              const docs = Object.entries(processedHashes).map(([hash, info]) => {
+                const fileExists = fs.existsSync(path.join(processedDir, info.fileName));
+                return {
+                  hash,
+                  fileName: info.fileName,
+                  processedAt: info.processedAt,
+                  hasFile: fileExists
+                };
+              });
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(docs));
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          } else if ((req.url?.startsWith('/api/view-processed-pdf') || req.url?.startsWith('/api/view-pdf')) && req.method === 'GET') {
+            try {
+              const parsedUrl = new URL(req.url, 'http://localhost:3000');
+              const fileName = parsedUrl.searchParams.get('fileName');
+              if (!fileName) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'fileName is required' }));
+                return;
+              }
+              const filesDir = '/Users/ali/Desktop/Master Thesis/files';
+              const processedDir = path.join(filesDir, 'processed files');
+              let targetPath = path.join(processedDir, fileName);
+              if (!fs.existsSync(targetPath)) {
+                targetPath = path.join(filesDir, fileName);
+              }
+              if (!fs.existsSync(targetPath)) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: `File not found: ${fileName}` }));
+                return;
+              }
+              const stat = fs.statSync(targetPath);
+              res.writeHead(200, {
+                'Content-Type': 'application/pdf',
+                'Content-Length': stat.size,
+                'Content-Disposition': `inline; filename="${encodeURIComponent(fileName)}"`
+              });
+              fs.createReadStream(targetPath).pipe(res);
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          } else if (req.url === '/api/record-processed-document' && req.method === 'POST') {
+            try {
+              let body = '';
+              req.on('data', chunk => {
+                body += chunk.toString();
+              });
+              req.on('end', () => {
+                try {
+                  const { fileName, fileHash, fileBase64 } = JSON.parse(body);
+                  if (!fileName) {
+                    throw new Error('fileName is required.');
+                  }
+                  const filesDir = '/Users/ali/Desktop/Master Thesis/files';
+                  const processedDir = path.join(filesDir, 'processed files');
+                  if (!fs.existsSync(processedDir)) {
+                    fs.mkdirSync(processedDir, { recursive: true });
+                  }
+                  const origPath = path.join(filesDir, fileName);
+                  const procPath = path.join(processedDir, fileName);
+                  if (fs.existsSync(origPath) && origPath !== procPath) {
+                    try {
+                      fs.renameSync(origPath, procPath);
+                    } catch (e) {
+                      fs.copyFileSync(origPath, procPath);
+                      fs.unlinkSync(origPath);
+                    }
+                  } else if (fileBase64 && !fs.existsSync(procPath)) {
+                    fs.writeFileSync(procPath, Buffer.from(fileBase64, 'base64'));
+                  }
+
+                  const csvsDir = path.resolve(__dirname, './csvs');
+                  const processedHashes = loadProcessedHashes(csvsDir);
+                  const hash = fileHash || crypto.createHash('sha256').update(fileName + '_' + Date.now()).digest('hex');
+                  processedHashes[hash] = {
+                    fileName,
+                    processedAt: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+                  };
+                  saveProcessedHashes(csvsDir, processedHashes);
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ success: true, hash }));
+                } catch (err: any) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: err.message }));
+                }
+              });
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          } else if (req.url === '/api/delete-processed-documents-batch' && req.method === 'POST') {
+            try {
+              let body = '';
+              req.on('data', chunk => {
+                body += chunk.toString();
+              });
+              req.on('end', () => {
+                try {
+                  const { hashes } = JSON.parse(body);
+                  if (!Array.isArray(hashes) || hashes.length === 0) {
+                    throw new Error('hashes array is required.');
+                  }
+                  const csvsDir = path.resolve(__dirname, './csvs');
+                  const processedHashes = loadProcessedHashes(csvsDir);
+                  const filesDir = '/Users/ali/Desktop/Master Thesis/files';
+                  const processedDir = path.join(filesDir, 'processed files');
+                  let deletedCount = 0;
+                  for (const hash of hashes) {
+                    if (processedHashes[hash]) {
+                      const fileName = processedHashes[hash].fileName;
+                      if (fileName) {
+                        const procPath = path.join(processedDir, fileName);
+                        const origPath = path.join(filesDir, fileName);
+                        if (fs.existsSync(procPath)) {
+                          try {
+                            fs.renameSync(procPath, origPath);
+                            console.log(`Returned "${fileName}" to original files directory.`);
+                          } catch (mvErr) {
+                            fs.copyFileSync(procPath, origPath);
+                            fs.unlinkSync(procPath);
+                          }
+                        }
+                      }
+                      delete processedHashes[hash];
+                      deletedCount++;
+                    }
+                  }
+                  saveProcessedHashes(csvsDir, processedHashes);
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ success: true, deletedCount }));
+                } catch (err: any) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: err.message }));
+                }
+              });
             } catch (err: any) {
               res.writeHead(500, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: err.message }));
@@ -212,43 +449,29 @@ export default defineConfig({
                   if (!id) {
                     throw new Error('ID is required.');
                   }
-                  
-                  const parts = id.split('_');
-                  const rowIndex = parseInt(parts.pop() || '1', 10);
-                  const fileName = parts.join('_');
-                  
-                  const csvsDir = path.resolve(__dirname, './csvs');
-                  const filePath = path.join(csvsDir, fileName);
-                  
-                  if (!fs.existsSync(filePath)) {
-                    throw new Error(`File not found: ${filePath}`);
+                  const targetRow = parseInt(String(id).split('_').pop() || '0', 10);
+                  const masterPath = path.resolve(__dirname, './csvs/reforms_master.csv');
+                  if (!fs.existsSync(masterPath)) {
+                    throw new Error(`File not found: ${masterPath}`);
                   }
                   
-                  const content = fs.readFileSync(filePath, 'utf8');
+                  const content = fs.readFileSync(masterPath, 'utf8');
                   const lines = content.split('\n');
                   const header = lines[0];
                   
-                  const newLines = [];
-                  newLines.push(header);
-                  
+                  const newLines = [header];
                   let currentDataRowIndex = 0;
                   for (let idx = 1; idx < lines.length; idx++) {
                     const line = lines[idx].trim();
                     if (line) {
                       currentDataRowIndex++;
-                      if (currentDataRowIndex !== rowIndex) {
+                      if (currentDataRowIndex !== targetRow) {
                         newLines.push(lines[idx]);
                       }
                     }
                   }
                   
-                  if (newLines.length <= 1) {
-                    fs.unlinkSync(filePath);
-                  } else {
-                    fs.writeFileSync(filePath, newLines.join('\n') + '\n', 'utf8');
-                  }
-                  
-                  // Rebuild master CSV
+                  fs.writeFileSync(masterPath, newLines.join('\n') + '\n', 'utf8');
                   rebuildMasterCsv();
                   
                   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -262,21 +485,63 @@ export default defineConfig({
               res.writeHead(500, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: err.message }));
             }
+          } else if (req.url === '/api/delete-proposals-batch' && req.method === 'POST') {
+            try {
+              let body = '';
+              req.on('data', chunk => {
+                body += chunk.toString();
+              });
+              req.on('end', () => {
+                try {
+                  const { ids } = JSON.parse(body);
+                  if (!Array.isArray(ids) || ids.length === 0) {
+                    throw new Error('ids array is required.');
+                  }
+                  const targetRows = new Set(ids.map(id => parseInt(String(id).split('_').pop() || '0', 10)));
+                  const masterPath = path.resolve(__dirname, './csvs/reforms_master.csv');
+                  if (!fs.existsSync(masterPath)) {
+                    throw new Error(`File not found: ${masterPath}`);
+                  }
+                  
+                  const content = fs.readFileSync(masterPath, 'utf8');
+                  const lines = content.split('\n');
+                  const header = lines[0];
+                  
+                  const newLines = [header];
+                  let currentDataRowIndex = 0;
+                  let deletedCount = 0;
+                  for (let idx = 1; idx < lines.length; idx++) {
+                    const line = lines[idx].trim();
+                    if (line) {
+                      currentDataRowIndex++;
+                      if (!targetRows.has(currentDataRowIndex)) {
+                        newLines.push(lines[idx]);
+                      } else {
+                        deletedCount++;
+                      }
+                    }
+                  }
+                  
+                  fs.writeFileSync(masterPath, newLines.join('\n') + '\n', 'utf8');
+                  rebuildMasterCsv();
+                  
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ success: true, deletedCount }));
+                } catch (err: any) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: err.message }));
+                }
+              });
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
           } else if (req.url === '/api/clear-all-proposals' && req.method === 'POST') {
             try {
-              const csvsDir = path.resolve(__dirname, './csvs');
-              if (fs.existsSync(csvsDir)) {
-                const files = fs.readdirSync(csvsDir);
-                for (const file of files) {
-                  if (path.extname(file).toLowerCase() === '.csv') {
-                    fs.unlinkSync(path.join(csvsDir, file));
-                  }
-                }
-              }
-              
-              const masterFile = '/Users/ali/Desktop/Master Thesis/files/extracted_reforms_database.csv';
+              const masterPath = path.resolve(__dirname, './csvs/reforms_master.csv');
               const header = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n';
-              fs.writeFileSync(masterFile, header, 'utf8');
+              fs.writeFileSync(masterPath, header, 'utf8');
+              rebuildMasterCsv();
               
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ success: true }));
@@ -292,16 +557,38 @@ export default defineConfig({
               });
               req.on('end', async () => {
                 try {
-                  const { fileName } = JSON.parse(body);
+                  const { fileName, force } = JSON.parse(body);
                   if (!fileName) {
                     throw new Error('fileName is required.');
                   }
                   const filesDir = '/Users/ali/Desktop/Master Thesis/files';
-                  const filePath = path.join(filesDir, fileName);
+                  const processedDir = path.join(filesDir, 'processed files');
+                  if (!fs.existsSync(processedDir)) {
+                    fs.mkdirSync(processedDir, { recursive: true });
+                  }
+                  let filePath = path.join(filesDir, fileName);
                   if (!fs.existsSync(filePath)) {
-                    throw new Error(`File not found: ${filePath}`);
+                    const inProcessed = path.join(processedDir, fileName);
+                    if (fs.existsSync(inProcessed)) {
+                      filePath = inProcessed;
+                    } else {
+                      throw new Error(`File not found: ${filePath}`);
+                    }
                   }
                   const fileBuffer = fs.readFileSync(filePath);
+                  const csvsDir = path.resolve(__dirname, './csvs');
+
+                  // Check SHA-256 hash for document-level deduplication
+                  const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+                  const processedHashes = loadProcessedHashes(csvsDir);
+
+                  if (!force && processedHashes[fileHash]) {
+                    res.writeHead(409, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ 
+                      error: `Duplicate document detected. This exact PDF was already extracted on ${processedHashes[fileHash].processedAt} as "${processedHashes[fileHash].fileName}".` 
+                    }));
+                    return;
+                  }
                   
                   // Construct FormData and post it to n8n manual webhook
                   const formData = new FormData();
@@ -315,6 +602,29 @@ export default defineConfig({
 
                   if (!n8nRes.ok) {
                     throw new Error(`n8n extraction failed: ${n8nRes.statusText}`);
+                  }
+
+                  // Record processed hash
+                  processedHashes[fileHash] = {
+                    fileName,
+                    processedAt: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+                  };
+                  saveProcessedHashes(csvsDir, processedHashes);
+
+                  // Move file to "processed files" folder
+                  const destPath = path.join(processedDir, fileName);
+                  if (fs.existsSync(filePath) && filePath !== destPath) {
+                    try {
+                      fs.renameSync(filePath, destPath);
+                      console.log(`Moved "${fileName}" to processed files folder.`);
+                    } catch (mvErr) {
+                      try {
+                        fs.copyFileSync(filePath, destPath);
+                        fs.unlinkSync(filePath);
+                      } catch (copyErr) {
+                        console.error(`Error moving ${fileName} to processed files:`, copyErr);
+                      }
+                    }
                   }
 
                   const arrayBuffer = await n8nRes.arrayBuffer();
