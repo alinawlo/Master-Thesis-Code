@@ -4,6 +4,10 @@ import { defineConfig } from "vite"
 import tailwindcss from "@tailwindcss/vite"
 import fs from "fs"
 import crypto from "crypto"
+import dotenv from "dotenv"
+
+dotenv.config({ path: path.resolve(__dirname, '.env') })
+
 import { 
   checkDuplicates, 
   mergeProposalRow, 
@@ -35,6 +39,9 @@ export default defineConfig({
               fs.mkdirSync(masterDir, { recursive: true });
             }
             fs.copyFileSync(masterSource, masterFile);
+            try {
+              fs.chmodSync(masterFile, 0o666);
+            } catch {}
           };
 
           if (req.url === '/api/check-duplicates' && req.method === 'POST') {
@@ -259,7 +266,8 @@ export default defineConfig({
                         const buf = fs.readFileSync(fullPf);
                         const h = crypto.createHash('sha256').update(buf).digest('hex');
                         const stat = fs.statSync(fullPf);
-                        processedHashes[h] = {
+                        processedHashes[pf] = {
+                          hash: h,
                           fileName: pf,
                           processedAt: stat.mtime.toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
                         };
@@ -275,10 +283,11 @@ export default defineConfig({
                 }
               }
 
-              const docs = Object.entries(processedHashes).map(([hash, info]) => {
+              const docs = Object.values(processedHashes).map(info => {
                 const fileExists = fs.existsSync(path.join(processedDir, info.fileName));
                 return {
-                  hash,
+                  id: info.fileName,
+                  hash: info.hash,
                   fileName: info.fileName,
                   processedAt: info.processedAt,
                   hasFile: fileExists
@@ -354,13 +363,14 @@ export default defineConfig({
                   const csvsDir = path.resolve(__dirname, './csvs');
                   const processedHashes = loadProcessedHashes(csvsDir);
                   const hash = fileHash || crypto.createHash('sha256').update(fileName + '_' + Date.now()).digest('hex');
-                  processedHashes[hash] = {
+                  processedHashes[fileName] = {
+                    hash,
                     fileName,
                     processedAt: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
                   };
                   saveProcessedHashes(csvsDir, processedHashes);
                   res.writeHead(200, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ success: true, hash }));
+                  res.end(JSON.stringify({ success: true, hash, fileName }));
                 } catch (err: any) {
                   res.writeHead(400, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ error: err.message }));
@@ -378,18 +388,23 @@ export default defineConfig({
               });
               req.on('end', () => {
                 try {
-                  const { hashes } = JSON.parse(body);
-                  if (!Array.isArray(hashes) || hashes.length === 0) {
-                    throw new Error('hashes array is required.');
+                  const { hashes, fileNames } = JSON.parse(body);
+                  const targets = fileNames || hashes;
+                  if (!Array.isArray(targets) || targets.length === 0) {
+                    throw new Error('fileNames or hashes array is required.');
                   }
                   const csvsDir = path.resolve(__dirname, './csvs');
                   const processedHashes = loadProcessedHashes(csvsDir);
                   const filesDir = '/Users/ali/Desktop/Master Thesis/files';
                   const processedDir = path.join(filesDir, 'processed files');
                   let deletedCount = 0;
-                  for (const hash of hashes) {
-                    if (processedHashes[hash]) {
-                      const fileName = processedHashes[hash].fileName;
+                  for (const target of targets) {
+                    const entryKey = processedHashes[target]
+                      ? target
+                      : Object.keys(processedHashes).find(k => processedHashes[k].hash === target);
+
+                    if (entryKey && processedHashes[entryKey]) {
+                      const fileName = processedHashes[entryKey].fileName || entryKey;
                       if (fileName) {
                         const procPath = path.join(processedDir, fileName);
                         const origPath = path.join(filesDir, fileName);
@@ -403,7 +418,7 @@ export default defineConfig({
                           }
                         }
                       }
-                      delete processedHashes[hash];
+                      delete processedHashes[entryKey];
                       deletedCount++;
                     }
                   }
@@ -582,10 +597,15 @@ export default defineConfig({
                   const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
                   const processedHashes = loadProcessedHashes(csvsDir);
 
-                  if (!force && processedHashes[fileHash]) {
+                  const duplicateDoc = Object.values(processedHashes).find(p => p.hash === fileHash);
+
+                  if (!force && duplicateDoc) {
                     res.writeHead(409, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ 
-                      error: `Duplicate document detected. This exact PDF was already extracted on ${processedHashes[fileHash].processedAt} as "${processedHashes[fileHash].fileName}".` 
+                      error: `Duplicate document detected. This exact PDF was already extracted on ${duplicateDoc.processedAt} as "${duplicateDoc.fileName}".`,
+                      isDuplicate: true,
+                      previousFileName: duplicateDoc.fileName,
+                      processedAt: duplicateDoc.processedAt
                     }));
                     return;
                   }
@@ -601,11 +621,45 @@ export default defineConfig({
                   });
 
                   if (!n8nRes.ok) {
-                    throw new Error(`n8n extraction failed: ${n8nRes.statusText}`);
+                    let errorMsg = `n8n extraction failed with status ${n8nRes.status}: ${n8nRes.statusText}`;
+                    try {
+                      const errData = await n8nRes.json();
+                      if (errData.message) errorMsg = errData.message;
+                      else if (errData.error) errorMsg = typeof errData.error === 'string' ? errData.error : JSON.stringify(errData.error);
+                    } catch {}
+                    throw new Error(errorMsg);
                   }
 
-                  // Record processed hash
-                  processedHashes[fileHash] = {
+                  const arrayBuffer = await n8nRes.arrayBuffer();
+                  const csvText = Buffer.from(arrayBuffer).toString('utf8');
+
+                  // Check if response is an error JSON payload from n8n
+                  try {
+                    const parsedJson = JSON.parse(csvText.trim());
+                    if (parsedJson.message || parsedJson.error) {
+                      throw new Error(parsedJson.message || parsedJson.error || 'n8n workflow execution error');
+                    }
+                  } catch (jsonErr: any) {
+                    if (jsonErr.message && !jsonErr.message.includes('JSON')) {
+                      throw jsonErr;
+                    }
+                  }
+
+                  // Validate CSV content: must contain header + at least 1 proposal row
+                  const csvLines = csvText.split('\n').map(l => l.trim()).filter(Boolean);
+                  if (csvLines.length <= 1) {
+                    console.warn(`Extraction yielded 0 proposals for "${fileName}". Keeping document in original location.`);
+                    res.writeHead(422, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ 
+                      error: `Extraction failed: n8n returned 0 proposals for "${fileName}". A backend node may have failed (e.g. Classification Agent service unavailable).`,
+                      count: 0
+                    }));
+                    return;
+                  }
+
+                  // Record processed document keyed by fileName ONLY when proposals are extracted
+                  processedHashes[fileName] = {
+                    hash: fileHash,
                     fileName,
                     processedAt: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
                   };
@@ -627,7 +681,6 @@ export default defineConfig({
                     }
                   }
 
-                  const arrayBuffer = await n8nRes.arrayBuffer();
                   res.writeHead(200, { 
                     'Content-Type': 'text/csv',
                     'Content-Disposition': `attachment; filename="reforms_${fileName.replace('.pdf', '')}.csv"`

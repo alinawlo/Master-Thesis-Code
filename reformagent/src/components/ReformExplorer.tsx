@@ -251,7 +251,7 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
   // Processed Documents Tab State
   const [activeDocTab, setActiveDocTab] = useState<'retrieved' | 'processed'>('retrieved');
   const [processedDocs, setProcessedDocs] = useState<ProcessedDocItem[]>([]);
-  const [selectedProcessedHashes, setSelectedProcessedHashes] = useState<string[]>([]);
+  const [selectedProcessedFiles, setSelectedProcessedFiles] = useState<string[]>([]);
   const [isProcessedSelectMode, setIsProcessedSelectMode] = useState(false);
 
   // Only documents that have NOT been processed are shown in Retrieved Policy Documents
@@ -309,11 +309,11 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
     }
   };
 
-  const handleDeleteProcessedBatch = async (hashesToDelete: string[]) => {
-    if (hashesToDelete.length === 0) return;
-    const confirmMsg = hashesToDelete.length === 1
+  const handleDeleteProcessedBatch = async (filesToDelete: string[]) => {
+    if (filesToDelete.length === 0) return;
+    const confirmMsg = filesToDelete.length === 1
       ? "Are you sure you want to remove this document from the processed history? It can then be extracted again."
-      : `Are you sure you want to remove ${hashesToDelete.length} document(s) from the processed history? They can then be extracted again.`;
+      : `Are you sure you want to remove ${filesToDelete.length} document(s) from the processed history? They can then be extracted again.`;
     
     if (!window.confirm(confirmMsg)) return;
 
@@ -321,11 +321,11 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
       const res = await fetch('/api/delete-processed-documents-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hashes: hashesToDelete })
+        body: JSON.stringify({ fileNames: filesToDelete, hashes: filesToDelete })
       });
       if (res.ok) {
-        toast.success(`Removed ${hashesToDelete.length} document(s) from processed history.`);
-        setSelectedProcessedHashes(prev => prev.filter(h => !hashesToDelete.includes(h)));
+        toast.success(`Removed ${filesToDelete.length} document(s) from processed history.`);
+        setSelectedProcessedFiles(prev => prev.filter(f => !filesToDelete.includes(f)));
         loadProcessedDocs();
         loadLocalFiles();
       } else {
@@ -658,24 +658,24 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                           size="sm"
                           className="h-7 text-xs font-medium px-2.5 bg-white hover:bg-zinc-100/80 text-zinc-700 transition-colors border-zinc-200 shadow-2xs"
                           onClick={() => {
-                            if (selectedProcessedHashes.length === processedDocs.length) {
-                              setSelectedProcessedHashes([]);
+                            if (selectedProcessedFiles.length === processedDocs.length) {
+                              setSelectedProcessedFiles([]);
                             } else {
-                              setSelectedProcessedHashes(processedDocs.map(d => d.hash));
+                              setSelectedProcessedFiles(processedDocs.map(d => d.fileName));
                             }
                           }}
                         >
-                          {selectedProcessedHashes.length === processedDocs.length ? 'Deselect All' : 'Select All'}
+                          {selectedProcessedFiles.length === processedDocs.length ? 'Deselect All' : 'Select All'}
                         </Button>
-                        {selectedProcessedHashes.length > 0 && (
+                        {selectedProcessedFiles.length > 0 && (
                           <Button
                             variant="destructive"
                             size="sm"
                             className="h-7 text-xs font-medium px-2.5 gap-1.5"
-                            onClick={() => handleDeleteProcessedBatch(selectedProcessedHashes)}
+                            onClick={() => handleDeleteProcessedBatch(selectedProcessedFiles)}
                           >
                             <Trash2 className="w-3.5 h-3.5" />
-                            Delete ({selectedProcessedHashes.length})
+                            Delete ({selectedProcessedFiles.length})
                           </Button>
                         )}
                         <Button
@@ -808,10 +808,10 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
               {processedDocs.map((doc) => {
-                const isSelected = selectedProcessedHashes.includes(doc.hash);
+                const isSelected = selectedProcessedFiles.includes(doc.fileName);
                 return (
                   <div 
-                    key={doc.hash}
+                    key={doc.fileName}
                     className={`transition-all border rounded-xl flex items-center justify-between shadow-2xs group w-full ${
                       isSelected 
                         ? 'border-emerald-300 bg-emerald-50/50 ring-1 ring-emerald-200' 
@@ -825,8 +825,8 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                           type="button"
                           className="shrink-0 text-zinc-400 hover:text-emerald-600 transition-colors cursor-pointer"
                           onClick={() => {
-                            setSelectedProcessedHashes(prev => 
-                              isSelected ? prev.filter(h => h !== doc.hash) : [...prev, doc.hash]
+                            setSelectedProcessedFiles(prev => 
+                              isSelected ? prev.filter(f => f !== doc.fileName) : [...prev, doc.fileName]
                             );
                           }}
                         >
@@ -876,7 +876,7 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                           variant="ghost"
                           size="sm" 
                           className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg shrink-0"
-                          onClick={() => handleDeleteProcessedBatch([doc.hash])}
+                          onClick={() => handleDeleteProcessedBatch([doc.fileName])}
                           title="Remove from processed history and return to files folder"
                         >
                           <Trash2 className="w-3.5 h-3.5" />

@@ -1,7 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 import { 
   Proposal, 
   ExistingProposal, 
@@ -92,12 +95,23 @@ export function saveEmbeddingsCache(
   }
 }
 
-export function loadProcessedHashes(csvsDir: string): Record<string, { fileName: string; processedAt: string }> {
+export function loadProcessedHashes(csvsDir: string): Record<string, { hash: string; fileName: string; processedAt: string }> {
   const hashPath = path.join(csvsDir, '.processed_hashes.json');
   if (fs.existsSync(hashPath)) {
     try {
       const content = fs.readFileSync(hashPath, 'utf8');
-      return JSON.parse(content);
+      const raw = JSON.parse(content);
+      const normalized: Record<string, { hash: string; fileName: string; processedAt: string }> = {};
+      for (const [key, val] of Object.entries(raw as Record<string, any>)) {
+        const fileName = val.fileName || key;
+        const hash = val.hash || (key.length === 64 ? key : '');
+        normalized[fileName] = {
+          hash,
+          fileName,
+          processedAt: val.processedAt || ''
+        };
+      }
+      return normalized;
     } catch (e) {
       console.error('Error reading processed hashes:', e);
     }
@@ -107,7 +121,7 @@ export function loadProcessedHashes(csvsDir: string): Record<string, { fileName:
 
 export function saveProcessedHashes(
   csvsDir: string,
-  hashes: Record<string, { fileName: string; processedAt: string }>
+  hashes: Record<string, { hash: string; fileName: string; processedAt: string }>
 ): void {
   const hashPath = path.join(csvsDir, '.processed_hashes.json');
   try {

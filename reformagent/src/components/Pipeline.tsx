@@ -14,7 +14,8 @@ import {
   ShieldCheck,
   Activity,
   Download,
-  AlertTriangle
+  AlertTriangle,
+  AlertCircle
 } from 'lucide-react';
 import { 
   Card, 
@@ -52,12 +53,42 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
   const [csvBlob, setCsvBlob] = useState<Blob | null>(null);
   const [proposalCount, setProposalCount] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Helper to generate a CSV blob strictly containing the chosen proposals
+  const generateProposalsCsv = (proposals: Proposal[]): Blob => {
+    const header = ['Vorschlag', 'Exaktes Verbatim', 'Quelldokument', 'Seitennummer', 'Kategorie', 'Verarbeitungsdatum'];
+    const rows = proposals.map(p => [
+      p.vorschlag || '',
+      p.verbatim || '',
+      p.quelldokument || '',
+      p.seitennummer || '',
+      p.kategorie || 'Sonstiges',
+      p.verarbeitungsdatum || new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+    ].map(val => {
+      const s = String(val ?? '');
+      if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    }).join(','));
+    const csvText = [header.join(','), ...rows].join('\n');
+    return new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+  };
 
   // RAG Deduplication States
   const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
   const [pendingDuplicates, setPendingDuplicates] = useState<DuplicateMatch[]>([]);
   const [pendingUnique, setPendingUnique] = useState<Proposal[]>([]);
   const [rawCsvText, setRawCsvText] = useState('');
+
+  // Duplicate Document Warning State
+  const [duplicateWarning, setDuplicateWarning] = useState<{
+    fileName: string;
+    previousFileName?: string;
+    processedAt?: string;
+    message: string;
+  } | null>(null);
 
   const addLog = (message: string) => {
     setLogs((prev: string[]) => [...prev, `[${new Date().toLocaleTimeString()}] ${message}`]);
@@ -93,12 +124,23 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
         incoming: d.match.incoming
       }));
       
-    // Only proposals explicitly marked as 'keep' are saved; untriggered/discarded ones are dropped
+    // Proposals explicitly marked as 'keep' (to be added as new separate rows)
     const keptAsNew = decisions
       .filter(d => d.action === 'keep')
       .map(d => d.match.incoming);
+
+    // Proposals marked as 'merge' (merged with existing entries)
+    const mergedProposals = decisions
+      .filter(d => d.action === 'merge')
+      .map(d => d.match.incoming);
       
     const allNewProposals = [...pendingUnique, ...keptAsNew];
+    // All proposals picked by the user (unique + kept as new row + merged with existing)
+    const allPickedProposals = [...pendingUnique, ...keptAsNew, ...mergedProposals];
+    
+    // Generate downloadable CSV containing ALL picked proposals matching the count displayed
+    const chosenCsvBlob = generateProposalsCsv(allPickedProposals);
+    setCsvBlob(chosenCsvBlob);
     
     addLog(`Saving ${merges.length} merged proposal(s) and ${allNewProposals.length} new proposal(s) to master database...`);
     
@@ -116,40 +158,49 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
       if (saveResponse.ok) {
         addLog("Success: Deduplication choices saved and master CSV updated.");
         toast.success(`Saved ${allNewProposals.length} new proposals and merged ${merges.length} sources.`);
-        setProposalCount(allNewProposals.length + merges.length);
+        setProposalCount(allPickedProposals.length);
         if (onDocumentProcessed) onDocumentProcessed(fileName);
         setStep('results');
       } else {
         const errJson = await saveResponse.json();
-        addLog(`Error saving proposals: ${errJson.error}`);
-        toast.error(`Failed to save proposals: ${errJson.error}`);
+        const saveError = `Failed to save proposals: ${errJson.error}`;
+        addLog(`[Error] ${saveError}`);
+        setErrorMessage(saveError);
+        setStep('error');
+        toast.error(saveError);
       }
     } catch (err: any) {
-      addLog(`Error during save: ${err.message}`);
-      toast.error(`Error saving: ${err.message}`);
+      const saveError = `Error during save: ${err.message}`;
+      addLog(`[Error] ${saveError}`);
+      setErrorMessage(saveError);
+      setStep('error');
+      toast.error(saveError);
     }
   };
 
-  const runExtraction = async () => {
+  const runExtraction = async (forceParam?: boolean | React.MouseEvent) => {
+    const force = forceParam === true;
     if (!localFileName && !selectedFile) {
       addLog("Error: No file selected.");
       return;
     }
 
     setIsProcessing(true);
-    setProgress(10);
+    setErrorMessage(null);
+    setProgress(15);
+    addLog("Extraction started...");
     
     try {
       let response;
       if (localFileName) {
         addLog("Requesting local server to process local PDF...");
-        addLog(`POSTing filename "${localFileName}" to /api/extract-local-pdf...`);
+        addLog(`POSTing filename "${localFileName}" to /api/extract-local-pdf...${force ? ' (Force Re-extract)' : ''}`);
         response = await fetch('/api/extract-local-pdf', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ fileName: localFileName })
+          body: JSON.stringify({ fileName: localFileName, force: Boolean(force) })
         });
       } else {
         addLog("Connecting to local n8n instance via Vite proxy...");
@@ -165,18 +216,27 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
       if (response.status === 409) {
         const errJson = await response.json();
         addLog(`Duplicate Document Blocked: ${errJson.error}`);
-        toast.warning(errJson.error, { duration: 6000 });
+        setDuplicateWarning({
+          fileName: localFileName || (selectedFile ? selectedFile.name : ''),
+          previousFileName: errJson.previousFileName,
+          processedAt: errJson.processedAt,
+          message: errJson.error
+        });
         setIsProcessing(false);
         return;
       }
 
       if (!response.ok) {
-        throw new Error(`n8n extraction failed: ${response.statusText}`);
+        let errorMsg = `n8n extraction failed with status ${response.status}: ${response.statusText}`;
+        try {
+          const errJson = await response.json();
+          if (errJson.error) errorMsg = errJson.error;
+        } catch {}
+        throw new Error(errorMsg);
       }
 
       const blob = await response.blob();
-      setCsvBlob(blob);
-      addLog("n8n: CSV data generated successfully.");
+      addLog("n8n: Extraction completed, analyzing returned data...");
       setProgress(75);
 
       if (selectedFile) {
@@ -191,109 +251,117 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
         }
       }
 
-      if (onDocumentProcessed) {
-        onDocumentProcessed(localFileName || (selectedFile ? selectedFile.name : ''));
-      }
-
       // Parse CSV to structured proposals
-      try {
-        const text = await blob.text();
-        setRawCsvText(text);
-        const lines = text.trim().split('\n');
-        const nonHeaderLines = lines.filter(line => line.trim().length > 0);
-        
-        const parsedProposals: Proposal[] = [];
-        const currentDocName = localFileName || (selectedFile ? selectedFile.name : 'document.pdf');
+      const text = await blob.text();
+      setRawCsvText(text);
+      const lines = text.trim().split('\n');
+      const nonHeaderLines = lines.filter(line => line.trim().length > 0);
+      
+      const parsedProposals: Proposal[] = [];
+      const currentDocName = localFileName || (selectedFile ? selectedFile.name : 'document.pdf');
 
-        for (let i = 1; i < nonHeaderLines.length; i++) {
-          const row = parseCsvLine(nonHeaderLines[i]);
-          if (row.length >= 4) {
-            const rawSource = (row[2] || '').trim();
-            let quelldokument = currentDocName;
-            if (rawSource && rawSource !== currentDocName && rawSource !== 'unknown_document.pdf') {
-              quelldokument = `${currentDocName} (${rawSource})`;
-            }
-
-            parsedProposals.push({
-              vorschlag: (row[0] || '').trim(),
-              verbatim: (row[1] || '').trim(),
-              quelldokument,
-              seitennummer: (row[3] || '').trim(),
-              kategorie: (row[4] || 'Sonstiges').trim(),
-              verarbeitungsdatum: (row[5] || new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })).trim()
-            });
+      for (let i = 1; i < nonHeaderLines.length; i++) {
+        const row = parseCsvLine(nonHeaderLines[i]);
+        if (row.length >= 4) {
+          const rawSource = (row[2] || '').trim();
+          let quelldokument = currentDocName;
+          if (rawSource && rawSource !== currentDocName && rawSource !== 'unknown_document.pdf') {
+            quelldokument = `${currentDocName} (${rawSource})`;
           }
+
+          parsedProposals.push({
+            vorschlag: (row[0] || '').trim(),
+            verbatim: (row[1] || '').trim(),
+            quelldokument,
+            seitennummer: (row[3] || '').trim(),
+            kategorie: (row[4] || 'Sonstiges').trim(),
+            verarbeitungsdatum: (row[5] || new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })).trim()
+          });
         }
-
-        const count = parsedProposals.length;
-        setProposalCount(count);
-        addLog(`Parsed CSV: Found ${count} proposal(s).`);
-
-        if (count === 0) {
-          setProgress(100);
-          setStep('results');
-          return;
-        }
-
-        // Run RAG Semantic Deduplication check
-        addLog("Running RAG semantic similarity check against master database...");
-        setProgress(85);
-
-        const dedupRes = await fetch('/api/check-duplicates', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ proposals: parsedProposals, threshold: 0.85 })
-        });
-
-        setProgress(100);
-
-        if (dedupRes.ok) {
-          const dedupData = await dedupRes.json();
-          const duplicates: DuplicateMatch[] = dedupData.duplicates || [];
-          const unique: Proposal[] = dedupData.unique || [];
-
-          if (duplicates.length > 0) {
-            addLog(`RAG Analysis: Found ${duplicates.length} semantic duplicate(s) and ${unique.length} unique proposal(s).`);
-            setPendingDuplicates(duplicates);
-            setPendingUnique(unique);
-            setIsReviewModalOpen(true);
-            // Wait for user modal decision
-            return;
-          } else {
-            addLog("RAG Analysis: All extracted proposals are unique.");
-          }
-        } else {
-          addLog("Warning: Deduplication service returned an error, proceeding with standard save.");
-        }
-
-        // No duplicates: save directly to reforms_master.csv
-        addLog("Saving proposals to master database (reforms_master.csv)...");
-        const targetFileName = 'reforms_master.csv';
-        const saveResponse = await fetch('/api/save-csv', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            fileName: targetFileName,
-            newProposals: parsedProposals
-          })
-        });
-
-        if (saveResponse.ok) {
-          addLog("Success: Saved proposals to reforms_master.csv and updated thesis database.");
-          if (onDocumentProcessed) onDocumentProcessed(fileName);
-          setStep('results');
-        } else {
-          const errJson = await saveResponse.json();
-          addLog(`Warning: Failed to save proposals: ${errJson.error}`);
-        }
-      } catch (innerErr) {
-        addLog(`Warning: Failed during CSV analysis or local storage: ${innerErr}`);
       }
 
-    } catch (error) {
-      addLog(`Error during extraction: ${error}`);
+      const count = parsedProposals.length;
+      setProposalCount(count);
+      addLog(`Parsed CSV: Found ${count} proposal(s).`);
+
+      if (count === 0) {
+        const zeroError = `Extraction failed: 0 proposals were extracted from "${currentDocName}". A pipeline error may have occurred in n8n (e.g. Classification Agent service unavailable).`;
+        addLog(`[Error] ${zeroError}`);
+        setErrorMessage(zeroError);
+        setIsProcessing(false);
+        setProgress(0);
+        setStep('error');
+        toast.error(zeroError);
+        return;
+      }
+
+      // Run RAG Semantic Deduplication check
+      addLog("Running RAG semantic similarity check against master database...");
+      setProgress(85);
+
+      const dedupRes = await fetch('/api/check-duplicates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proposals: parsedProposals, threshold: 0.85 })
+      });
+
+      setProgress(100);
+
+      if (dedupRes.ok) {
+        const dedupData = await dedupRes.json();
+        const duplicates: DuplicateMatch[] = dedupData.duplicates || [];
+        const unique: Proposal[] = dedupData.unique || [];
+
+        if (duplicates.length > 0) {
+          addLog(`RAG Analysis: Found ${duplicates.length} semantic duplicate(s) and ${unique.length} unique proposal(s).`);
+          setPendingDuplicates(duplicates);
+          setPendingUnique(unique);
+          setIsReviewModalOpen(true);
+          // Wait for user modal decision
+          return;
+        } else {
+          addLog("RAG Analysis: All extracted proposals are unique.");
+        }
+      } else {
+        addLog("Warning: Deduplication service returned an error, proceeding with standard save.");
+      }
+
+      // No duplicates: save directly to reforms_master.csv
+      addLog("Saving proposals to master database (reforms_master.csv)...");
+      const targetFileName = 'reforms_master.csv';
+      const saveResponse = await fetch('/api/save-csv', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          fileName: targetFileName,
+          newProposals: parsedProposals
+        })
+      });
+
+      if (saveResponse.ok) {
+        addLog("Success: Saved proposals to reforms_master.csv and updated thesis database.");
+        if (onDocumentProcessed) onDocumentProcessed(fileName);
+        const chosenBlob = generateProposalsCsv(parsedProposals);
+        setCsvBlob(chosenBlob);
+        setStep('results');
+      } else {
+        const errJson = await saveResponse.json();
+        const saveError = `Failed to save proposals: ${errJson.error}`;
+        addLog(`[Error] ${saveError}`);
+        setErrorMessage(saveError);
+        setStep('error');
+        toast.error(saveError);
+      }
+    } catch (error: any) {
+      const errorMsg = error?.message || String(error);
+      addLog(`[Error] Extraction failed: ${errorMsg}`);
+      setErrorMessage(errorMsg);
+      setIsProcessing(false);
+      setProgress(0);
+      setStep('error');
+      toast.error(errorMsg);
     } finally {
       setIsProcessing(false);
     }
@@ -411,7 +479,7 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
                     
                     {!isProcessing && (
                       <div className="flex justify-center pt-4">
-                        <Button onClick={runExtraction}>
+                        <Button onClick={() => runExtraction(false)}>
                           Start Extraction
                         </Button>
                       </div>
@@ -462,6 +530,64 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
                 </Card>
               </motion.div>
             )}
+
+            {step === 'error' && (
+              <motion.div 
+                key="error"
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="space-y-4"
+              >
+                <Card className="border-red-300 bg-red-50/20">
+                  <CardHeader className="py-4">
+                    <CardTitle className="flex items-center gap-2 text-red-600 text-lg">
+                      <AlertCircle className="w-5 h-5" />
+                      Extraction Failed
+                    </CardTitle>
+                    <CardDescription className="text-xs text-red-600/80">
+                      The extraction pipeline could not complete processing {fileName}.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="py-2">
+                    <div className="p-4 flex flex-col border border-red-200 rounded-xl bg-white shadow-xs text-zinc-900 space-y-3">
+                      <div className="flex items-start gap-3">
+                        <div className="w-9 h-9 rounded-xl bg-red-50 text-red-600 border border-red-100 flex items-center justify-center shrink-0 mt-0.5">
+                          <X className="w-5 h-5" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold text-zinc-900">
+                            Pipeline Error
+                          </p>
+                          <p className="text-xs text-zinc-700 mt-1 leading-relaxed break-words font-mono bg-zinc-50 p-2.5 rounded-lg border border-zinc-200/80">
+                            {errorMessage || "An unexpected error occurred during extraction."}
+                          </p>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-zinc-500 pt-1 border-t border-zinc-100">
+                        The document was not marked as processed, and no changes were made to the database. You can inspect the logs on the right or retry the extraction.
+                      </p>
+                    </div>
+                  </CardContent>
+                  <CardFooter className="py-4 flex justify-end gap-2 flex-wrap">
+                    <Button variant="outline" size="sm" onClick={onCancel}>
+                      Close
+                    </Button>
+                    <Button 
+                      size="sm" 
+                      className="bg-zinc-900 hover:bg-zinc-800 text-white gap-1.5 shadow-xs"
+                      onClick={() => {
+                        setErrorMessage(null);
+                        setStep('extract');
+                        runExtraction(true);
+                      }}
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Retry Extraction
+                    </Button>
+                  </CardFooter>
+                </Card>
+              </motion.div>
+            )}
           </AnimatePresence>
         </div>
  
@@ -499,6 +625,63 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
         uniqueProposals={pendingUnique}
         onConfirm={handleDeduplicationConfirm}
       />
+
+      {duplicateWarning && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/10 backdrop-blur-[2px] p-4 animate-in fade-in duration-150">
+          <div className="bg-white border border-zinc-200/90 rounded-2xl shadow-xl max-w-md w-full p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-sky-50 text-sky-600 border border-sky-100 flex items-center justify-center shrink-0">
+                <FileText className="w-5 h-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-sm font-semibold text-zinc-900">
+                  Document Already Processed
+                </h3>
+                <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                  This document's content matches{' '}
+                  <span className="font-semibold text-zinc-900 font-mono">
+                    "{duplicateWarning.previousFileName || 'previous file'}"
+                  </span>
+                  {duplicateWarning.processedAt && (
+                    <>
+                      , extracted on{' '}
+                      <span className="font-semibold text-zinc-800">
+                        {duplicateWarning.processedAt}
+                      </span>
+                    </>
+                  )}.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-zinc-50 border border-zinc-200/70 rounded-xl p-3 text-xs text-zinc-600 leading-relaxed">
+              Extracting again will run the extraction pipeline and register this file as a separate document in your processed history.
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs font-medium px-3 border-zinc-200 text-zinc-700 hover:bg-zinc-100"
+                onClick={() => setDuplicateWarning(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                className="h-8 text-xs font-semibold px-3 bg-zinc-900 hover:bg-zinc-800 text-white shadow-xs gap-1.5"
+                onClick={() => {
+                  setDuplicateWarning(null);
+                  runExtraction(true);
+                }}
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Force Re-extract
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

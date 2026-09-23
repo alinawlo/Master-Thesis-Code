@@ -20,7 +20,7 @@ export interface ExtractionResult {
   summary: string;
 }
 
-export type PipelineStep = 'upload' | 'extract' | 'results';
+export type PipelineStep = 'upload' | 'extract' | 'results' | 'error';
 
 export interface ProcessedDocument {
   id: string;
