@@ -127,11 +127,70 @@ function getCategoryBadge(category: string) {
   return 'bg-slate-100 text-slate-700 border-slate-200';
 }
 
-function renderNumberedText(text: string, isItalicText: boolean = false) {
+function DocumentRevealButton({
+  theme,
+  remainingCount,
+  onExpand,
+}: {
+  theme: 'sky' | 'emerald';
+  remainingCount: number;
+  onExpand: () => void;
+}) {
+  const isEmerald = theme === 'emerald';
+  return (
+    <button
+      type="button"
+      onClick={onExpand}
+      className={`border border-dashed transition-all rounded-xl flex items-center justify-center gap-2 shadow-2xs cursor-pointer h-[48px] w-full text-xs font-semibold group px-3 ${
+        isEmerald
+          ? 'border-emerald-300 hover:border-emerald-400 bg-emerald-50/50 hover:bg-emerald-100/70 text-emerald-800 hover:text-emerald-950'
+          : 'border-sky-300 hover:border-sky-400 bg-sky-50/50 hover:bg-sky-100/70 text-sky-800 hover:text-sky-950'
+      }`}
+    >
+      <ChevronDown className={`w-4 h-4 transition-transform group-hover:translate-y-0.5 shrink-0 ${
+        isEmerald ? 'text-emerald-600 group-hover:text-emerald-800' : 'text-sky-600 group-hover:text-sky-800'
+      }`} />
+      <span className="truncate">Reveal rest of documents ({remainingCount} more)</span>
+    </button>
+  );
+}
+
+function DocumentHideButton({
+  theme,
+  onCollapse,
+}: {
+  theme: 'sky' | 'emerald';
+  onCollapse: () => void;
+}) {
+  const isEmerald = theme === 'emerald';
+  return (
+    <div className="mt-3.5 flex justify-center">
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={onCollapse}
+        className={`text-xs font-medium flex items-center gap-1.5 px-3.5 py-1 h-7 rounded-lg shadow-2xs ${
+          isEmerald
+            ? 'text-emerald-800 hover:text-emerald-950 bg-emerald-50/60 hover:bg-emerald-100 border-emerald-200'
+            : 'text-sky-800 hover:text-sky-950 bg-sky-50/60 hover:bg-sky-100 border-sky-200'
+        }`}
+      >
+        <ChevronUp className={`w-3.5 h-3.5 ${isEmerald ? 'text-emerald-600' : 'text-sky-600'}`} />
+        Hide documents
+      </Button>
+    </div>
+  );
+}
+
+function renderNumberedItems(
+  text: string, 
+  renderItem: (content: string, isMarked: boolean) => React.ReactNode,
+  gapClass: string = "gap-1.5"
+) {
   if (!text) return "N/A";
   const parts = text.split(/(?=\b\d+\)\s*)/g).filter(p => p.trim());
   if (parts.length <= 1) {
-    return <span className={isItalicText ? "italic" : ""}>{text}</span>;
+    return renderItem(text, false);
   }
   return (
     <div className="space-y-1.5 py-0.5">
@@ -140,16 +199,22 @@ function renderNumberedText(text: string, isItalicText: boolean = false) {
         if (markerMatch) {
           const [_, marker, rest] = markerMatch;
           return (
-            <div key={index} className="flex items-start gap-1.5 leading-relaxed">
+            <div key={index} className={`flex items-start ${gapClass}`}>
               <span className="italic font-bold text-indigo-600 shrink-0">{marker}</span>
-              <span className={isItalicText ? "italic" : ""}>{rest}</span>
+              <div className="min-w-0 flex-1">{renderItem(rest, true)}</div>
             </div>
           );
         }
-        return <div key={index} className={isItalicText ? "italic" : ""}>{part}</div>;
+        return <div key={index}>{renderItem(part, false)}</div>;
       })}
     </div>
   );
+}
+
+function renderNumberedText(text: string, isItalicText: boolean = false) {
+  return renderNumberedItems(text, (content) => (
+    <span className={isItalicText ? "italic" : ""}>{content}</span>
+  ), "gap-1.5 leading-relaxed");
 }
 
 function renderSingleSource(srcText: string) {
@@ -202,28 +267,7 @@ function renderSingleSource(srcText: string) {
 }
 
 function renderNumberedSource(source: string) {
-  if (!source) return "N/A";
-  const parts = source.split(/(?=\b\d+\)\s*)/g).filter(p => p.trim());
-  if (parts.length <= 1) {
-    return renderSingleSource(source);
-  }
-  return (
-    <div className="space-y-1.5 py-0.5">
-      {parts.map((part, index) => {
-        const markerMatch = part.match(/^(\d+\))\s*(.*)/s);
-        if (markerMatch) {
-          const [_, marker, rest] = markerMatch;
-          return (
-            <div key={index} className="flex items-start gap-1.5">
-              <span className="italic font-bold text-indigo-600 shrink-0">{marker}</span>
-              <div className="min-w-0">{renderSingleSource(rest)}</div>
-            </div>
-          );
-        }
-        return <div key={index}>{renderSingleSource(part)}</div>;
-      })}
-    </div>
-  );
+  return renderNumberedItems(source, (content) => renderSingleSource(content));
 }
 
 interface ReformExplorerProps {
@@ -274,41 +318,21 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [isDownloading, setIsDownloading] = useState(false);
 
-  const loadLocalFiles = async () => {
+  const fetchAndSet = async <T,>(url: string, setter: (data: T) => void, label: string) => {
     try {
-      const response = await fetch('/api/list-pdfs');
+      const response = await fetch(url);
       if (response.ok) {
         const data = await response.json();
-        setLocalFiles(data);
+        setter(data);
       }
     } catch (e) {
-      console.error("Failed to load local files list:", e);
+      console.error(`Failed to load ${label}:`, e);
     }
   };
 
-  const loadProposals = async () => {
-    try {
-      const response = await fetch('/api/list-proposals');
-      if (response.ok) {
-        const data = await response.json();
-        setProposals(data);
-      }
-    } catch (e) {
-      console.error("Failed to load proposals list:", e);
-    }
-  };
-
-  const loadProcessedDocs = async () => {
-    try {
-      const response = await fetch('/api/list-processed-documents');
-      if (response.ok) {
-        const data = await response.json();
-        setProcessedDocs(data);
-      }
-    } catch (e) {
-      console.error("Failed to load processed documents list:", e);
-    }
-  };
+  const loadLocalFiles = () => fetchAndSet<string[]>('/api/list-pdfs', setLocalFiles, 'local files');
+  const loadProposals = () => fetchAndSet<any[]>('/api/list-proposals', setProposals, 'proposals');
+  const loadProcessedDocs = () => fetchAndSet<ProcessedDocItem[]>('/api/list-processed-documents', setProcessedDocs, 'processed docs');
 
   const handleDeleteProcessedBatch = async (filesToDelete: string[]) => {
     if (filesToDelete.length === 0) return;
@@ -337,26 +361,7 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
     }
   };
 
-  const handleDeleteProposal = async (id: string) => {
-    if (!window.confirm("Are you sure you want to delete this proposal entry?")) {
-      return;
-    }
-    try {
-      const response = await fetch('/api/delete-proposal', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id })
-      });
-      if (response.ok) {
-        toast.success("Proposal entry deleted successfully.");
-        loadProposals();
-      } else {
-        throw new Error("Deletion failed");
-      }
-    } catch (e) {
-      toast.error("Failed to delete proposal entry.");
-    }
-  };
+  const handleDeleteProposal = (id: string) => handleDeleteProposalsBatch([id]);
 
   const handleDeleteProposalsBatch = async (idsToDelete: string[]) => {
     if (idsToDelete.length === 0) return;
@@ -778,29 +783,19 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                 ))}
 
                 {!isDocsExpanded && unprocessedFiles.length > 2 && (
-                  <button
-                    type="button"
-                    onClick={() => setIsDocsExpanded(true)}
-                    className="border border-dashed border-sky-300 hover:border-sky-400 bg-sky-50/50 hover:bg-sky-100/70 transition-all rounded-xl flex items-center justify-center gap-2 shadow-2xs text-sky-800 hover:text-sky-950 cursor-pointer h-[48px] w-full text-xs font-semibold group px-3"
-                  >
-                    <ChevronDown className="w-4 h-4 text-sky-600 group-hover:text-sky-800 transition-transform group-hover:translate-y-0.5 shrink-0" />
-                    <span className="truncate">Reveal rest of documents ({unprocessedFiles.length - 2} more)</span>
-                  </button>
+                  <DocumentRevealButton
+                    theme="sky"
+                    remainingCount={unprocessedFiles.length - 2}
+                    onExpand={() => setIsDocsExpanded(true)}
+                  />
                 )}
               </div>
 
               {isDocsExpanded && unprocessedFiles.length > 2 && (
-                <div className="mt-3.5 flex justify-center">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setIsDocsExpanded(false)}
-                    className="text-xs font-medium text-sky-800 hover:text-sky-950 bg-sky-50/60 hover:bg-sky-100 border-sky-200 flex items-center gap-1.5 px-3.5 py-1 h-7 rounded-lg shadow-2xs"
-                  >
-                    <ChevronUp className="w-3.5 h-3.5 text-sky-600" />
-                    Hide documents
-                  </Button>
-                </div>
+                <DocumentHideButton
+                  theme="sky"
+                  onCollapse={() => setIsDocsExpanded(false)}
+                />
               )}
             </div>
           )
@@ -896,29 +891,19 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                 })}
 
                 {!isProcessedExpanded && processedDocs.length > 2 && (
-                  <button
-                    type="button"
-                    onClick={() => setIsProcessedExpanded(true)}
-                    className="border border-dashed border-emerald-300 hover:border-emerald-400 bg-emerald-50/50 hover:bg-emerald-100/70 transition-all rounded-xl flex items-center justify-center gap-2 shadow-2xs text-emerald-800 hover:text-emerald-950 cursor-pointer h-[48px] w-full text-xs font-semibold group px-3"
-                  >
-                    <ChevronDown className="w-4 h-4 text-emerald-600 group-hover:text-emerald-800 transition-transform group-hover:translate-y-0.5 shrink-0" />
-                    <span className="truncate">Reveal rest of documents ({processedDocs.length - 2} more)</span>
-                  </button>
+                  <DocumentRevealButton
+                    theme="emerald"
+                    remainingCount={processedDocs.length - 2}
+                    onExpand={() => setIsProcessedExpanded(true)}
+                  />
                 )}
               </div>
 
               {isProcessedExpanded && processedDocs.length > 2 && (
-                <div className="mt-3.5 flex justify-center">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setIsProcessedExpanded(false)}
-                    className="text-xs font-medium text-emerald-800 hover:text-emerald-950 bg-emerald-50/60 hover:bg-emerald-100 border-emerald-200 flex items-center gap-1.5 px-3.5 py-1 h-7 rounded-lg shadow-2xs"
-                  >
-                    <ChevronUp className="w-3.5 h-3.5 text-emerald-600" />
-                    Hide documents
-                  </Button>
-                </div>
+                <DocumentHideButton
+                  theme="emerald"
+                  onCollapse={() => setIsProcessedExpanded(false)}
+                />
               )}
             </div>
           )

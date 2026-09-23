@@ -17,6 +17,12 @@ import {
   saveProcessedHashes 
 } from "./src/server/ragDeduplication"
 
+const CSVS_DIR = path.resolve(__dirname, './csvs');
+const MASTER_SOURCE = path.join(CSVS_DIR, 'reforms_master.csv');
+const FILES_DIR = '/Users/ali/Desktop/Master Thesis/files';
+const PROCESSED_DIR = path.join(FILES_DIR, 'processed files');
+const MASTER_EXPORT_FILE = path.join(FILES_DIR, 'extracted_reforms_database.csv');
+
 export default defineConfig({
   plugins: [
     react(), 
@@ -24,25 +30,52 @@ export default defineConfig({
     {
       name: 'save-csv-middleware',
       configureServer(server) {
+        // Helper function to rebuild master CSV
+        const rebuildMasterCsv = () => {
+          const header = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n';
+          
+          if (!fs.existsSync(MASTER_SOURCE)) {
+            fs.writeFileSync(MASTER_SOURCE, header, 'utf8');
+          }
+          const masterDir = path.dirname(MASTER_EXPORT_FILE);
+          if (!fs.existsSync(masterDir)) {
+            fs.mkdirSync(masterDir, { recursive: true });
+          }
+          fs.copyFileSync(MASTER_SOURCE, MASTER_EXPORT_FILE);
+          try {
+            fs.chmodSync(MASTER_EXPORT_FILE, 0o666);
+          } catch {}
+        };
+
+        // Helper function to delete proposal rows by ID
+        const deleteProposalsFromMaster = (ids: string[]) => {
+          const targetRows = new Set(ids.map(id => parseInt(String(id).split('_').pop() || '0', 10)));
+          if (!fs.existsSync(MASTER_SOURCE)) {
+            throw new Error(`File not found: ${MASTER_SOURCE}`);
+          }
+          const content = fs.readFileSync(MASTER_SOURCE, 'utf8');
+          const lines = content.split('\n');
+          const header = lines[0];
+          const newLines = [header];
+          let currentDataRowIndex = 0;
+          let deletedCount = 0;
+          for (let idx = 1; idx < lines.length; idx++) {
+            const line = lines[idx].trim();
+            if (line) {
+              currentDataRowIndex++;
+              if (!targetRows.has(currentDataRowIndex)) {
+                newLines.push(lines[idx]);
+              } else {
+                deletedCount++;
+              }
+            }
+          }
+          fs.writeFileSync(MASTER_SOURCE, newLines.join('\n') + '\n', 'utf8');
+          rebuildMasterCsv();
+          return deletedCount;
+        };
+
         server.middlewares.use(async (req, res, next) => {
-          // Helper function to rebuild master CSV
-          const rebuildMasterCsv = () => {
-            const masterSource = path.resolve(__dirname, './csvs/reforms_master.csv');
-            const masterFile = '/Users/ali/Desktop/Master Thesis/files/extracted_reforms_database.csv';
-            const header = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n';
-            
-            if (!fs.existsSync(masterSource)) {
-              fs.writeFileSync(masterSource, header, 'utf8');
-            }
-            const masterDir = path.dirname(masterFile);
-            if (!fs.existsSync(masterDir)) {
-              fs.mkdirSync(masterDir, { recursive: true });
-            }
-            fs.copyFileSync(masterSource, masterFile);
-            try {
-              fs.chmodSync(masterFile, 0o666);
-            } catch {}
-          };
 
           if (req.url === '/api/check-duplicates' && req.method === 'POST') {
             try {
@@ -464,31 +497,7 @@ export default defineConfig({
                   if (!id) {
                     throw new Error('ID is required.');
                   }
-                  const targetRow = parseInt(String(id).split('_').pop() || '0', 10);
-                  const masterPath = path.resolve(__dirname, './csvs/reforms_master.csv');
-                  if (!fs.existsSync(masterPath)) {
-                    throw new Error(`File not found: ${masterPath}`);
-                  }
-                  
-                  const content = fs.readFileSync(masterPath, 'utf8');
-                  const lines = content.split('\n');
-                  const header = lines[0];
-                  
-                  const newLines = [header];
-                  let currentDataRowIndex = 0;
-                  for (let idx = 1; idx < lines.length; idx++) {
-                    const line = lines[idx].trim();
-                    if (line) {
-                      currentDataRowIndex++;
-                      if (currentDataRowIndex !== targetRow) {
-                        newLines.push(lines[idx]);
-                      }
-                    }
-                  }
-                  
-                  fs.writeFileSync(masterPath, newLines.join('\n') + '\n', 'utf8');
-                  rebuildMasterCsv();
-                  
+                  deleteProposalsFromMaster([id]);
                   res.writeHead(200, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ success: true }));
                 } catch (err: any) {
@@ -512,34 +521,7 @@ export default defineConfig({
                   if (!Array.isArray(ids) || ids.length === 0) {
                     throw new Error('ids array is required.');
                   }
-                  const targetRows = new Set(ids.map(id => parseInt(String(id).split('_').pop() || '0', 10)));
-                  const masterPath = path.resolve(__dirname, './csvs/reforms_master.csv');
-                  if (!fs.existsSync(masterPath)) {
-                    throw new Error(`File not found: ${masterPath}`);
-                  }
-                  
-                  const content = fs.readFileSync(masterPath, 'utf8');
-                  const lines = content.split('\n');
-                  const header = lines[0];
-                  
-                  const newLines = [header];
-                  let currentDataRowIndex = 0;
-                  let deletedCount = 0;
-                  for (let idx = 1; idx < lines.length; idx++) {
-                    const line = lines[idx].trim();
-                    if (line) {
-                      currentDataRowIndex++;
-                      if (!targetRows.has(currentDataRowIndex)) {
-                        newLines.push(lines[idx]);
-                      } else {
-                        deletedCount++;
-                      }
-                    }
-                  }
-                  
-                  fs.writeFileSync(masterPath, newLines.join('\n') + '\n', 'utf8');
-                  rebuildMasterCsv();
-                  
+                  const deletedCount = deleteProposalsFromMaster(ids);
                   res.writeHead(200, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ success: true, deletedCount }));
                 } catch (err: any) {
