@@ -253,6 +253,7 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
   const [processedDocs, setProcessedDocs] = useState<ProcessedDocItem[]>([]);
   const [selectedProcessedFiles, setSelectedProcessedFiles] = useState<string[]>([]);
   const [isProcessedSelectMode, setIsProcessedSelectMode] = useState(false);
+  const [isProcessedExpanded, setIsProcessedExpanded] = useState(false);
 
   // Only documents that have NOT been processed are shown in Retrieved Policy Documents
   const unprocessedFiles = localFiles.filter(fileName => !processedDocs.some(d => d.fileName === fileName));
@@ -684,7 +685,7 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                           className="h-7 text-xs px-2 text-muted-foreground hover:text-foreground hover:bg-zinc-100/60"
                           onClick={() => {
                             setIsProcessedSelectMode(false);
-                            setSelectedProcessedHashes([]);
+                            setSelectedProcessedFiles([]);
                           }}
                         >
                           Cancel
@@ -695,7 +696,10 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                         variant="outline"
                         size="sm"
                         className="h-7 text-xs font-medium px-2.5 gap-1.5 border-zinc-200 bg-white hover:bg-zinc-100/80 text-zinc-700 hover:text-zinc-900 transition-colors shadow-2xs"
-                        onClick={() => setIsProcessedSelectMode(true)}
+                        onClick={() => {
+                          setIsProcessedSelectMode(true);
+                          setIsProcessedExpanded(true);
+                        }}
                       >
                         <CheckSquare className="w-3.5 h-3.5 text-zinc-500" />
                         Select
@@ -806,86 +810,116 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
               No processed documents recorded yet. Once extractions are completed, documents will appear here.
             </p>
           ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-              {processedDocs.map((doc) => {
-                const isSelected = selectedProcessedFiles.includes(doc.fileName);
-                return (
-                  <div 
-                    key={doc.fileName}
-                    className={`transition-all border rounded-xl flex items-center justify-between shadow-2xs group w-full ${
-                      isSelected 
-                        ? 'border-emerald-300 bg-emerald-50/50 ring-1 ring-emerald-200' 
-                        : 'border-zinc-200/90 bg-white hover:bg-emerald-50/20 hover:border-emerald-200'
-                    }`}
-                    style={{ padding: '6px 8px' }}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                      {isProcessedSelectMode ? (
-                        <button
-                          type="button"
-                          className="shrink-0 text-zinc-400 hover:text-emerald-600 transition-colors cursor-pointer"
-                          onClick={() => {
-                            setSelectedProcessedFiles(prev => 
-                              isSelected ? prev.filter(f => f !== doc.fileName) : [...prev, doc.fileName]
-                            );
-                          }}
-                        >
-                          {isSelected ? (
-                            <CheckSquare className="w-4 h-4 text-emerald-600" />
-                          ) : (
-                            <Square className="w-4 h-4" />
-                          )}
-                        </button>
-                      ) : (
-                        <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 shadow-2xs">
-                          <CheckCircle2 className="w-4 h-4" />
-                        </div>
-                      )}
-                      <div className="min-w-0 flex-1 flex flex-col justify-center">
-                        <Tooltip content={doc.fileName}>
-                          <a
-                            href={`/api/view-pdf?fileName=${encodeURIComponent(doc.fileName)}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-xs font-semibold truncate text-zinc-900 hover:underline transition-colors pr-1 block"
-                            title="Open & read PDF in new tab"
+            <div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+                {(!isProcessedExpanded && processedDocs.length > 2
+                  ? processedDocs.slice(0, 2)
+                  : processedDocs
+                ).map((doc) => {
+                  const isSelected = selectedProcessedFiles.includes(doc.fileName);
+                  return (
+                    <div 
+                      key={doc.fileName}
+                      className={`transition-all border rounded-xl flex items-center justify-between shadow-2xs group w-full ${
+                        isSelected 
+                          ? 'border-emerald-300 bg-emerald-50/50 ring-1 ring-emerald-200' 
+                          : 'border-zinc-200/90 bg-white hover:bg-emerald-50/20 hover:border-emerald-200'
+                      }`}
+                      style={{ padding: '6px 8px' }}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                        {isProcessedSelectMode ? (
+                          <button
+                            type="button"
+                            className="shrink-0 text-zinc-400 hover:text-emerald-600 transition-colors cursor-pointer"
+                            onClick={() => {
+                              setSelectedProcessedFiles(prev => 
+                                isSelected ? prev.filter(f => f !== doc.fileName) : [...prev, doc.fileName]
+                              );
+                            }}
                           >
-                            {doc.fileName}
-                          </a>
-                        </Tooltip>
-                        <span className="text-[10px] text-emerald-700 mt-0.5 leading-none font-mono">
-                          Extracted: {doc.processedAt}
-                        </span>
+                            {isSelected ? (
+                              <CheckSquare className="w-4 h-4 text-emerald-600" />
+                            ) : (
+                              <Square className="w-4 h-4" />
+                            )}
+                          </button>
+                        ) : (
+                          <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 shadow-2xs">
+                            <CheckCircle2 className="w-4 h-4" />
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1 flex flex-col justify-center">
+                          <Tooltip content={doc.fileName}>
+                            <a
+                              href={`/api/view-pdf?fileName=${encodeURIComponent(doc.fileName)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs font-semibold truncate text-zinc-900 hover:underline transition-colors pr-1 block"
+                              title="Open & read PDF in new tab"
+                            >
+                              {doc.fileName}
+                            </a>
+                          </Tooltip>
+                          <span className="text-[10px] text-emerald-700 mt-0.5 leading-none font-mono">
+                            Extracted: {doc.processedAt}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <a
+                          href={`/api/view-pdf?fileName=${encodeURIComponent(doc.fileName)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 h-7 px-2 text-[11px] font-semibold text-zinc-800 hover:text-zinc-950 bg-white hover:bg-zinc-50 border border-zinc-300 hover:border-zinc-400 rounded-lg shadow-2xs transition-colors"
+                          title="Read PDF document"
+                        >
+                          <Eye className="w-3.5 h-3.5 text-zinc-700" />
+                          <span>Read</span>
+                        </a>
+
+                        {!isProcessedSelectMode && (
+                          <Button 
+                            variant="ghost"
+                            size="sm" 
+                            className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg shrink-0"
+                            onClick={() => handleDeleteProcessedBatch([doc.fileName])}
+                            title="Remove from processed history and return to files folder"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
                       </div>
                     </div>
+                  );
+                })}
 
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <a
-                        href={`/api/view-pdf?fileName=${encodeURIComponent(doc.fileName)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 h-7 px-2 text-[11px] font-semibold text-zinc-800 hover:text-zinc-950 bg-white hover:bg-zinc-50 border border-zinc-300 hover:border-zinc-400 rounded-lg shadow-2xs transition-colors"
-                        title="Read PDF document"
-                      >
-                        <Eye className="w-3.5 h-3.5 text-zinc-700" />
-                        <span>Read</span>
-                      </a>
+                {!isProcessedExpanded && processedDocs.length > 2 && (
+                  <button
+                    type="button"
+                    onClick={() => setIsProcessedExpanded(true)}
+                    className="border border-dashed border-emerald-300 hover:border-emerald-400 bg-emerald-50/50 hover:bg-emerald-100/70 transition-all rounded-xl flex items-center justify-center gap-2 shadow-2xs text-emerald-800 hover:text-emerald-950 cursor-pointer h-[48px] w-full text-xs font-semibold group px-3"
+                  >
+                    <ChevronDown className="w-4 h-4 text-emerald-600 group-hover:text-emerald-800 transition-transform group-hover:translate-y-0.5 shrink-0" />
+                    <span className="truncate">Reveal rest of documents ({processedDocs.length - 2} more)</span>
+                  </button>
+                )}
+              </div>
 
-                      {!isProcessedSelectMode && (
-                        <Button 
-                          variant="ghost"
-                          size="sm" 
-                          className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg shrink-0"
-                          onClick={() => handleDeleteProcessedBatch([doc.fileName])}
-                          title="Remove from processed history and return to files folder"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+              {isProcessedExpanded && processedDocs.length > 2 && (
+                <div className="mt-3.5 flex justify-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setIsProcessedExpanded(false)}
+                    className="text-xs font-medium text-emerald-800 hover:text-emerald-950 bg-emerald-50/60 hover:bg-emerald-100 border-emerald-200 flex items-center gap-1.5 px-3.5 py-1 h-7 rounded-lg shadow-2xs"
+                  >
+                    <ChevronUp className="w-3.5 h-3.5 text-emerald-600" />
+                    Hide documents
+                  </Button>
+                </div>
+              )}
             </div>
           )
         )}
