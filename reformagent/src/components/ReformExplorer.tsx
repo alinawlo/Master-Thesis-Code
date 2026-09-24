@@ -43,9 +43,20 @@ import {
 import { Input } from '@/src/components/ui/input';
 import { Button } from '@/src/components/ui/button';
 import { Badge } from '@/src/components/ui/badge';
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem
+} from '@/src/components/ui/dropdown-menu';
 import { ScrollArea } from '@/src/components/ui/scroll-area';
 import { Progress } from '@/src/components/ui/progress';
 import { ProcessedDocument } from '../types';
+import { escapeCsvField } from '../types/deduplication';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 
@@ -308,6 +319,11 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
     ...processedDocs.map(d => d.fileName).filter(Boolean)
   ]).size;
 
+  // Filter States for Proposals Table
+  const [selectedFileFilter, setSelectedFileFilter] = useState<string>('ALL');
+  const [selectedDateFilter, setSelectedDateFilter] = useState<string>('ALL');
+  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('ALL');
+
   // Proposal Batch Select State
   const [selectedProposalIds, setSelectedProposalIds] = useState<string[]>([]);
   const [isProposalSelectMode, setIsProposalSelectMode] = useState(false);
@@ -317,6 +333,114 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
   const [discoveredDocs, setDiscoveredDocs] = useState<any[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [isDownloading, setIsDownloading] = useState(false);
+
+  // Extract individual clean file names from a proposal's source string
+  const getProposalFiles = (sourceText: string): string[] => {
+    if (!sourceText) return [];
+    // Match filenames ending with .pdf, e.g. "zangazanga.pdf" or "pd2.pdf"
+    const matches = sourceText.match(/[a-zA-Z0-9_\u00C0-\u017F.-]+\.pdf/gi);
+    if (matches && matches.length > 0) {
+      return Array.from(new Set(matches));
+    }
+    // Fallback: strip url annotations like " (www.vitako.de)" and numbers like "1) "
+    const cleaned = sourceText.replace(/\s*\([^)]*\)/g, '').replace(/\b\d+\)\s*/g, '').trim();
+    return cleaned ? [cleaned] : [];
+  };
+
+  // Extract date strings (DD.MM.YYYY) from a proposal's processedAt string
+  const getProposalDates = (dateText: string): string[] => {
+    if (!dateText) return [];
+    // Match date patterns like 21.9.2026 or 21.09.2026 or 2026-09-21
+    const matches = dateText.match(/\b\d{1,2}\.\d{1,2}\.\d{4}\b|\b\d{4}-\d{2}-\d{2}\b/g);
+    if (matches && matches.length > 0) {
+      return Array.from(new Set(matches));
+    }
+    const firstPart = dateText.split(',')[0].replace(/\b\d+\)\s*/g, '').trim();
+    return firstPart ? [firstPart] : [];
+  };
+
+  // Compute unique file names and extraction dates across all proposals
+  const uniqueFileNames = Array.from(
+    new Set(proposals.flatMap(p => getProposalFiles(p.source || '')))
+  ).filter(Boolean).sort((a, b) => a.localeCompare(b));
+
+  const uniqueExtractionDates = Array.from(
+    new Set(proposals.flatMap(p => getProposalDates(p.processedAt || '')))
+  ).filter(Boolean).sort((a, b) => {
+    // Sort dates descending (newest first)
+    const parseDateStr = (d: string) => {
+      const parts = d.split('.');
+      if (parts.length === 3) {
+        return new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0])).getTime();
+      }
+      return new Date(d).getTime() || 0;
+    };
+    return parseDateStr(b) - parseDateStr(a);
+  });
+
+  const uniqueCategories = Array.from(
+    new Set(proposals.map(p => (p.category || '').trim()).filter(Boolean))
+  ).sort((a, b) => a.localeCompare(b));
+
+  const filteredProposals = proposals.filter(p => {
+    // 1. Text Search Filter
+    const matchesSearch = !searchTerm || 
+      (p.text || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
+      (p.verbatim || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (p.source || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (p.category || '').toLowerCase().includes(searchTerm.toLowerCase());
+
+    // 2. File Name Filter
+    const matchesFile = selectedFileFilter === 'ALL' || 
+      getProposalFiles(p.source || '').includes(selectedFileFilter);
+
+    // 3. Extraction Day Filter
+    const matchesDate = selectedDateFilter === 'ALL' || 
+      getProposalDates(p.processedAt || '').includes(selectedDateFilter);
+
+    // 4. Category Filter
+    const matchesCategory = selectedCategoryFilter === 'ALL' ||
+      (p.category || '').trim() === selectedCategoryFilter;
+
+    return matchesSearch && matchesFile && matchesDate && matchesCategory;
+  });
+
+  // Client-side export of filtered proposals as CSV
+  const handleDownloadFilteredCsv = () => {
+    if (filteredProposals.length === 0) {
+      toast.error("No proposals to export in current view.");
+      return;
+    }
+    const headers = ['Vorschlag', 'Exaktes Verbatim', 'Quelldokument', 'Seitennummer', 'Kategorie', 'Verarbeitungsdatum'];
+    const csvRows = [headers.map(escapeCsvField).join(',')];
+
+    for (const p of filteredProposals) {
+      csvRows.push([
+        escapeCsvField(p.text || ''),
+        escapeCsvField(p.verbatim || ''),
+        escapeCsvField(p.source || ''),
+        escapeCsvField(p.page || ''),
+        escapeCsvField(p.category || ''),
+        escapeCsvField(p.processedAt || '')
+      ].join(','));
+    }
+
+    const blob = new Blob([csvRows.join('\n') + '\n'], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    
+    // Construct dynamic clean filename based on applied filters
+    const fileSuffix = selectedFileFilter !== 'ALL' ? `_${selectedFileFilter.replace(/\.pdf$/i, '')}` : '';
+    const dateSuffix = selectedDateFilter !== 'ALL' ? `_${selectedDateFilter.replace(/[^\w]/g, '-')}` : '';
+    const categorySuffix = selectedCategoryFilter !== 'ALL' ? `_${selectedCategoryFilter.replace(/[^\w]+/g, '-')}` : '';
+    link.setAttribute('download', `reforms_filtered${fileSuffix}${dateSuffix}${categorySuffix}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    toast.success(`Exported ${filteredProposals.length} filtered proposals.`);
+  };
 
   const fetchAndSet = async <T,>(url: string, setter: (data: T) => void, label: string) => {
     try {
@@ -408,13 +532,6 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
     return () => window.removeEventListener('focus', handleFocus);
   }, []);
 
-  const filteredProposals = proposals.filter(p => {
-    return (p.text || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
-           (p.verbatim || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-           (p.source || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-           (p.category || '').toLowerCase().includes(searchTerm.toLowerCase());
-  });
-
   const handleStartSearch = (category: string) => {
     setSelectedCategory(category);
     runWebDiscovery(category);
@@ -501,7 +618,15 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
       }
       
       const result = await response.json();
-      toast.success(`Successfully downloaded ${result.successCount} documents!`, { id: toastId });
+      if (result.skippedDuplicatesCount > 0) {
+        if (result.successCount > 0) {
+          toast.success(`Downloaded ${result.successCount} new document(s). Skipped ${result.skippedDuplicatesCount} identical duplicate(s).`, { id: toastId });
+        } else {
+          toast.info(`All ${result.skippedDuplicatesCount} document(s) were skipped (identical content already exists in repository).`, { id: toastId });
+        }
+      } else {
+        toast.success(`Successfully downloaded ${result.successCount} documents!`, { id: toastId });
+      }
       setIsDiscoveryModalOpen(false);
       loadLocalFiles();
     } catch (e) {
@@ -973,25 +1098,214 @@ export default function ReformExplorer({ documents, onAddProposal, onStartLocalE
                   Select
                 </Button>
               )}
+
+              {/* Download Filtered CSV Button (Active when filtered or specific view) */}
+              {(selectedFileFilter !== 'ALL' || selectedDateFilter !== 'ALL' || selectedCategoryFilter !== 'ALL' || searchTerm.trim() !== '') && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="flex items-center gap-1.5 shrink-0 border border-indigo-200 bg-indigo-50/70 hover:bg-indigo-100 text-indigo-800 font-semibold shadow-2xs h-9 text-xs rounded-lg"
+                  onClick={handleDownloadFilteredCsv}
+                  title={`Download only the ${filteredProposals.length} currently filtered proposals as CSV`}
+                >
+                  <Download className="w-4 h-4 text-indigo-600" />
+                  Download Filtered ({filteredProposals.length})
+                </Button>
+              )}
+
               <Button
                 variant="outline"
                 size="sm"
                 className="flex items-center gap-1.5 shrink-0 border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100 text-emerald-800 font-semibold shadow-2xs h-9 text-xs rounded-lg"
                 onClick={() => window.open('/api/download-master-csv', '_blank')}
+                title="Download entire master database as CSV"
               >
                 <Download className="w-4 h-4 text-emerald-600" />
                 Download Master CSV
               </Button>
-              <div className="relative w-64 md:w-72 shrink-0">
+              <div className="relative w-56 md:w-64 shrink-0">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                 <Input 
-                  placeholder="Search extracted proposals..." 
+                  placeholder="Search proposals..." 
                   className="pl-9 bg-zinc-50/50 border-zinc-200 h-9 w-full rounded-lg text-xs"
                   value={searchTerm}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSearchTerm(e.target.value)}
                 />
               </div>
             </div>
+          </div>
+
+          {/* Filter Bar: File Name and Day of Extraction */}
+          <div className="flex flex-wrap items-center gap-3 pt-3.5 mt-2 border-t border-zinc-100">
+            <div className="flex items-center gap-1.5 text-xs text-zinc-600 font-semibold shrink-0">
+              <Filter className="w-3.5 h-3.5 text-zinc-500" />
+              <span>Filter by:</span>
+            </div>
+
+            {/* File Name Filter Dropdown */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-medium text-zinc-500 shrink-0">
+                File:
+              </span>
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs font-medium bg-white hover:bg-zinc-50 border border-black text-zinc-900 rounded-lg px-2.5 flex items-center justify-between gap-2 max-w-[220px] shadow-2xs cursor-pointer"
+                    >
+                      <span className="truncate">
+                        {selectedFileFilter === 'ALL'
+                          ? `All Files (${uniqueFileNames.length})`
+                          : selectedFileFilter}
+                      </span>
+                      <ChevronDown className="w-3.5 h-3.5 text-zinc-600 shrink-0 ml-0.5" />
+                    </Button>
+                  }
+                />
+                <DropdownMenuContent align="start" className="w-64 max-h-72 overflow-y-auto custom-scrollbar p-1 shadow-xl border border-black !bg-white">
+                  <DropdownMenuRadioGroup
+                    value={selectedFileFilter}
+                    onValueChange={(val) => setSelectedFileFilter(val)}
+                  >
+                    <DropdownMenuRadioItem
+                      value="ALL"
+                      className="text-xs font-medium cursor-pointer py-1.5 px-2 rounded-md hover:bg-zinc-100"
+                    >
+                      <span className="font-semibold">All Files</span>
+                      <span className="text-zinc-500 font-mono text-[10px] ml-1">({uniqueFileNames.length})</span>
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuSeparator className="my-1 bg-zinc-200" />
+                    {uniqueFileNames.map((fileName) => (
+                      <DropdownMenuRadioItem
+                        key={fileName}
+                        value={fileName}
+                        className="text-xs cursor-pointer py-1.5 px-2 rounded-md truncate hover:bg-zinc-100"
+                      >
+                        <span className="truncate" title={fileName}>{fileName}</span>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+
+            {/* Day of Extraction Filter Dropdown */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-medium text-zinc-500 shrink-0">
+                Extraction Date:
+              </span>
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs font-medium bg-white hover:bg-zinc-50 border border-black text-zinc-900 rounded-lg px-2.5 flex items-center justify-between gap-2 shadow-2xs cursor-pointer"
+                    >
+                      <span className="truncate">
+                        {selectedDateFilter === 'ALL'
+                          ? `All Dates (${uniqueExtractionDates.length})`
+                          : selectedDateFilter}
+                      </span>
+                      <ChevronDown className="w-3.5 h-3.5 text-zinc-600 shrink-0 ml-0.5" />
+                    </Button>
+                  }
+                />
+                <DropdownMenuContent align="start" className="w-52 max-h-72 overflow-y-auto custom-scrollbar p-1 shadow-xl border border-black !bg-white">
+                  <DropdownMenuRadioGroup
+                    value={selectedDateFilter}
+                    onValueChange={(val) => setSelectedDateFilter(val)}
+                  >
+                    <DropdownMenuRadioItem
+                      value="ALL"
+                      className="text-xs font-medium cursor-pointer py-1.5 px-2 rounded-md hover:bg-zinc-100"
+                    >
+                      <span className="font-semibold">All Dates</span>
+                      <span className="text-zinc-500 font-mono text-[10px] ml-1">({uniqueExtractionDates.length})</span>
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuSeparator className="my-1 bg-zinc-200" />
+                    {uniqueExtractionDates.map((dateStr) => (
+                      <DropdownMenuRadioItem
+                        key={dateStr}
+                        value={dateStr}
+                        className="text-xs font-mono cursor-pointer py-1.5 px-2 rounded-md hover:bg-zinc-100"
+                      >
+                        <span>{dateStr}</span>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+
+            {/* Category Filter Dropdown */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-medium text-zinc-500 shrink-0">
+                Category:
+              </span>
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs font-medium bg-white hover:bg-zinc-50 border border-black text-zinc-900 rounded-lg px-2.5 flex items-center justify-between gap-2 max-w-[220px] shadow-2xs cursor-pointer"
+                    >
+                      <span className="truncate">
+                        {selectedCategoryFilter === 'ALL'
+                          ? `All Categories (${uniqueCategories.length})`
+                          : selectedCategoryFilter}
+                      </span>
+                      <ChevronDown className="w-3.5 h-3.5 text-zinc-600 shrink-0 ml-0.5" />
+                    </Button>
+                  }
+                />
+                <DropdownMenuContent align="start" className="w-56 max-h-72 overflow-y-auto custom-scrollbar p-1 shadow-xl border border-black !bg-white">
+                  <DropdownMenuRadioGroup
+                    value={selectedCategoryFilter}
+                    onValueChange={(val) => setSelectedCategoryFilter(val)}
+                  >
+                    <DropdownMenuRadioItem
+                      value="ALL"
+                      className="text-xs font-medium cursor-pointer py-1.5 px-2 rounded-md hover:bg-zinc-100"
+                    >
+                      <span className="font-semibold">All Categories</span>
+                      <span className="text-zinc-500 font-mono text-[10px] ml-1">({uniqueCategories.length})</span>
+                    </DropdownMenuRadioItem>
+                    <DropdownMenuSeparator className="my-1 bg-zinc-200" />
+                    {uniqueCategories.map((category) => (
+                      <DropdownMenuRadioItem
+                        key={category}
+                        value={category}
+                        className="text-xs cursor-pointer py-1.5 px-2 rounded-md truncate hover:bg-zinc-100"
+                      >
+                        <span className="truncate" title={category}>{category}</span>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+
+            {/* Reset Filters Button */}
+            {(selectedFileFilter !== 'ALL' || selectedDateFilter !== 'ALL' || selectedCategoryFilter !== 'ALL' || searchTerm.trim() !== '') && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 px-2 rounded-md flex items-center gap-1"
+                onClick={() => {
+                  setSelectedFileFilter('ALL');
+                  setSelectedDateFilter('ALL');
+                  setSelectedCategoryFilter('ALL');
+                  setSearchTerm('');
+                }}
+              >
+                <X className="w-3.5 h-3.5" />
+                Reset filters
+              </Button>
+            )}
           </div>
         </CardHeader>
         <CardContent className="pt-6">

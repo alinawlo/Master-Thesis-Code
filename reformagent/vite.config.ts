@@ -13,11 +13,20 @@ import {
   mergeProposalRow, 
   escapeCsvField, 
   parseCsvLine, 
+  parseCsvRows,
   loadProcessedHashes, 
-  saveProcessedHashes 
+  saveProcessedHashes,
+  loadKnownDocumentsRegistry,
+  registerDocumentEntry,
+  getAllKnownTitlesAndUrls
 } from "./src/server/ragDeduplication"
+import { 
+  logExtractionExecution, 
+  getExecutionHistory 
+} from "./src/server/executionLogger"
 
 const CSVS_DIR = path.resolve(__dirname, './csvs');
+const WORKFLOWS_DIR = path.resolve(__dirname, './workflows');
 const MASTER_SOURCE = path.join(CSVS_DIR, 'reforms_master.csv');
 const FILES_DIR = '/Users/ali/Desktop/Master Thesis/files';
 const PROCESSED_DIR = path.join(FILES_DIR, 'processed files');
@@ -54,20 +63,18 @@ export default defineConfig({
             throw new Error(`File not found: ${MASTER_SOURCE}`);
           }
           const content = fs.readFileSync(MASTER_SOURCE, 'utf8');
-          const lines = content.split('\n');
-          const header = lines[0];
+          const rows = parseCsvRows(content);
+          if (rows.length === 0) return 0;
+          const header = rows[0].map(escapeCsvField).join(',');
           const newLines = [header];
           let currentDataRowIndex = 0;
           let deletedCount = 0;
-          for (let idx = 1; idx < lines.length; idx++) {
-            const line = lines[idx].trim();
-            if (line) {
-              currentDataRowIndex++;
-              if (!targetRows.has(currentDataRowIndex)) {
-                newLines.push(lines[idx]);
-              } else {
-                deletedCount++;
-              }
+          for (let idx = 1; idx < rows.length; idx++) {
+            currentDataRowIndex++;
+            if (!targetRows.has(currentDataRowIndex)) {
+              newLines.push(rows[idx].map(escapeCsvField).join(','));
+            } else {
+              deletedCount++;
             }
           }
           fs.writeFileSync(MASTER_SOURCE, newLines.join('\n') + '\n', 'utf8');
@@ -239,14 +246,13 @@ export default defineConfig({
               
               if (fs.existsSync(masterPath)) {
                 const content = fs.readFileSync(masterPath, 'utf8');
-                const lines = content.split('\n');
+                const rows = parseCsvRows(content);
                 let currentDataRow = 0;
                 
-                for (let idx = 1; idx < lines.length; idx++) {
-                  const line = lines[idx].trim();
-                  if (!line) continue;
+                for (let idx = 1; idx < rows.length; idx++) {
+                  const row = rows[idx];
+                  if (!row || row.length === 0 || (row.length === 1 && !row[0].trim())) continue;
                   currentDataRow++;
-                  const row = parseCsvLine(line);
                   if (row.length >= 4) {
                     const text = row[0] || '';
                     const verbatim = row[1] || '';
@@ -597,10 +603,32 @@ export default defineConfig({
                   const blob = new Blob([fileBuffer], { type: 'application/pdf' });
                   formData.append('data', blob, fileName);
 
-                  const n8nRes = await fetch(`http://localhost:5678/webhook/extract-reforms?fileName=${encodeURIComponent(fileName)}`, {
-                    method: 'POST',
-                    body: formData
-                  });
+                  // Track execution timing for audit & history
+                  const startTime = Date.now();
+                  const startedAt = new Date().toISOString();
+
+                  let n8nRes: Response;
+                  try {
+                    n8nRes = await fetch(`http://localhost:5678/webhook/extract-reforms?fileName=${encodeURIComponent(fileName)}`, {
+                      method: 'POST',
+                      body: formData
+                    });
+                  } catch (fetchErr: any) {
+                    logExtractionExecution({
+                      executionId: `err_${Date.now()}`,
+                      fileName,
+                      status: 'error',
+                      startedAt,
+                      stoppedAt: new Date().toISOString(),
+                      durationMs: Date.now() - startTime,
+                      proposalsCount: 0,
+                      error: `Could not connect to n8n: ${fetchErr.message}`,
+                      timestamp: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+                    });
+                    throw fetchErr;
+                  }
+
+                  const executionIdHeader = n8nRes.headers.get('x-n8n-execution-id') || `${Date.now()}`;
 
                   if (!n8nRes.ok) {
                     let errorMsg = `n8n extraction failed with status ${n8nRes.status}: ${n8nRes.statusText}`;
@@ -609,6 +637,19 @@ export default defineConfig({
                       if (errData.message) errorMsg = errData.message;
                       else if (errData.error) errorMsg = typeof errData.error === 'string' ? errData.error : JSON.stringify(errData.error);
                     } catch {}
+
+                    logExtractionExecution({
+                      executionId: executionIdHeader,
+                      fileName,
+                      status: 'error',
+                      startedAt,
+                      stoppedAt: new Date().toISOString(),
+                      durationMs: Date.now() - startTime,
+                      proposalsCount: 0,
+                      error: errorMsg,
+                      timestamp: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+                    });
+
                     throw new Error(errorMsg);
                   }
 
@@ -619,7 +660,19 @@ export default defineConfig({
                   try {
                     const parsedJson = JSON.parse(csvText.trim());
                     if (parsedJson.message || parsedJson.error) {
-                      throw new Error(parsedJson.message || parsedJson.error || 'n8n workflow execution error');
+                      const errorMsg = parsedJson.message || parsedJson.error || 'n8n workflow execution error';
+                      logExtractionExecution({
+                        executionId: executionIdHeader,
+                        fileName,
+                        status: 'error',
+                        startedAt,
+                        stoppedAt: new Date().toISOString(),
+                        durationMs: Date.now() - startTime,
+                        proposalsCount: 0,
+                        error: typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg),
+                        timestamp: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+                      });
+                      throw new Error(errorMsg);
                     }
                   } catch (jsonErr: any) {
                     if (jsonErr.message && !jsonErr.message.includes('JSON')) {
@@ -628,16 +681,43 @@ export default defineConfig({
                   }
 
                   // Validate CSV content: must contain header + at least 1 proposal row
-                  const csvLines = csvText.split('\n').map(l => l.trim()).filter(Boolean);
-                  if (csvLines.length <= 1) {
+                  const parsedRows = parseCsvRows(csvText);
+                  if (parsedRows.length <= 1) {
                     console.warn(`Extraction yielded 0 proposals for "${fileName}". Keeping document in original location.`);
+                    const errorMsg = `Extraction failed: n8n returned 0 proposals for "${fileName}". A backend node may have failed (e.g. LLM service unavailable).`;
+                    logExtractionExecution({
+                      executionId: executionIdHeader,
+                      fileName,
+                      status: 'error',
+                      startedAt,
+                      stoppedAt: new Date().toISOString(),
+                      durationMs: Date.now() - startTime,
+                      proposalsCount: 0,
+                      error: errorMsg,
+                      timestamp: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+                    });
                     res.writeHead(422, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ 
-                      error: `Extraction failed: n8n returned 0 proposals for "${fileName}". A backend node may have failed (e.g. Classification Agent service unavailable).`,
+                      error: errorMsg,
                       count: 0
                     }));
                     return;
                   }
+
+                  const proposalsCount = parsedRows.length - 1;
+
+                  // Log successful execution record
+                  logExtractionExecution({
+                    executionId: executionIdHeader,
+                    fileName,
+                    status: 'success',
+                    startedAt,
+                    stoppedAt: new Date().toISOString(),
+                    durationMs: Date.now() - startTime,
+                    proposalsCount,
+                    error: null,
+                    timestamp: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+                  });
 
                   // Record processed document keyed by fileName ONLY when proposals are extracted
                   processedHashes[fileName] = {
@@ -677,13 +757,28 @@ export default defineConfig({
               res.writeHead(500, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: err.message }));
             }
+          } else if (req.url === '/api/execution-history' && req.method === 'GET') {
+            try {
+              const history = getExecutionHistory();
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(history));
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
           } else if (req.url.startsWith('/api/search-documents') && req.method === 'GET') {
             try {
               const category = new URL(req.url, 'http://localhost').searchParams.get('category') || 'Random';
+              const known = getAllKnownTitlesAndUrls(CSVS_DIR);
+
               const n8nRes = await fetch(`http://localhost:5678/webhook/discover-reforms?category=${encodeURIComponent(category)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ category })
+                body: JSON.stringify({ 
+                  category,
+                  knownTitles: known.titles.slice(0, 30),
+                  knownUrls: known.urls.slice(0, 50)
+                })
               });
 
               if (!n8nRes.ok) {
@@ -711,10 +806,51 @@ export default defineConfig({
                   }
                   
                   let successCount = 0;
+                  let skippedDuplicatesCount = 0;
+                  const skippedDetails: Array<{ title: string; duplicateOf: string }> = [];
+
                   const filesDir = '/Users/ali/Desktop/Master Thesis/files';
+                  const processedDir = path.join(filesDir, 'processed files');
                   if (!fs.existsSync(filesDir)) {
                     fs.mkdirSync(filesDir, { recursive: true });
                   }
+                  if (!fs.existsSync(processedDir)) {
+                    fs.mkdirSync(processedDir, { recursive: true });
+                  }
+
+                  // 1. Build an in-memory index of all existing PDF SHA-256 hashes across files/ and processed files/
+                  const existingHashes = new Map<string, string>(); // hash -> fileName
+
+                  // From .processed_hashes.json
+                  const processedMap = loadProcessedHashes(CSVS_DIR);
+                  for (const p of Object.values(processedMap)) {
+                    if (p.hash && p.fileName) {
+                      existingHashes.set(p.hash, p.fileName);
+                    }
+                  }
+
+                  // From files on disk (both unprocessed and processed directories)
+                  const scanDiskDir = (dir: string) => {
+                    if (!fs.existsSync(dir)) return;
+                    try {
+                      const files = fs.readdirSync(dir);
+                      for (const file of files) {
+                        if (file.toLowerCase().endsWith('.pdf')) {
+                          try {
+                            const fullP = path.join(dir, file);
+                            const buf = fs.readFileSync(fullP);
+                            const h = crypto.createHash('sha256').update(buf).digest('hex');
+                            if (!existingHashes.has(h)) {
+                              existingHashes.set(h, file);
+                            }
+                          } catch {}
+                        }
+                      }
+                    } catch {}
+                  };
+
+                  scanDiskDir(filesDir);
+                  scanDiskDir(processedDir);
 
                   for (const doc of documents) {
                     try {
@@ -744,6 +880,32 @@ export default defineConfig({
                       }
                       
                       const arrayBuffer = await downloadRes.arrayBuffer();
+                      const fileBuffer = Buffer.from(arrayBuffer);
+
+                      // 2. LAYER 1: Compute SHA-256 of downloaded PDF bytes
+                      const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+                      if (existingHashes.has(fileHash)) {
+                        const existingName = existingHashes.get(fileHash)!;
+                        console.warn(`[Download] BLOCKED DUPLICATE: "${doc.title || doc.url}" has identical SHA-256 hash to "${existingName}".`);
+                        skippedDuplicatesCount++;
+                        skippedDetails.push({
+                          title: doc.title || 'Untitled',
+                          duplicateOf: existingName
+                        });
+
+                        // Register this URL & title into known registry so it won't be searched again
+                        registerDocumentEntry(CSVS_DIR, {
+                          fileName: existingName,
+                          hash: fileHash,
+                          title: doc.title,
+                          url: doc.url,
+                          status: 'active'
+                        });
+
+                        continue;
+                      }
+
                       let baseName = doc.title || 'downloaded_doc';
                       let cleanName = baseName
                         .toLowerCase()
@@ -761,7 +923,18 @@ export default defineConfig({
                         counter++;
                       }
 
-                      fs.writeFileSync(filePath, Buffer.from(arrayBuffer));
+                      fs.writeFileSync(filePath, fileBuffer);
+                      existingHashes.set(fileHash, cleanFileName);
+
+                      // Register newly downloaded document
+                      registerDocumentEntry(CSVS_DIR, {
+                        fileName: cleanFileName,
+                        hash: fileHash,
+                        title: doc.title,
+                        url: doc.url,
+                        status: 'active'
+                      });
+
                       successCount++;
                     } catch (downloadErr: any) {
                       console.error(`Error downloading document from ${doc.url}:`, downloadErr.message);
@@ -769,7 +942,12 @@ export default defineConfig({
                   }
 
                   res.writeHead(200, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ success: true, successCount }));
+                  res.end(JSON.stringify({ 
+                    success: true, 
+                    successCount, 
+                    skippedDuplicatesCount,
+                    skippedDetails 
+                  }));
                 } catch (err: any) {
                   res.writeHead(400, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ error: err.message }));

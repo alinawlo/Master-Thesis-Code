@@ -1,0 +1,762 @@
+{
+  "id": "2h6wjlwz3hyXqgsz",
+  "name": "ReformAgent",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nlet content = '';\n\ntry {\n  content = fs.readFileSync('/data/downloaded_urls.txt', 'utf8');\n} catch (e) {\n  // Safe fallback if file doesn't exist yet\n}\n\nconst incoming = $input.first() ? $input.first().json : {};\nconst knownTitles = (incoming.body && incoming.body.knownTitles) || incoming.knownTitles || [];\nconst knownUrls = (incoming.body && incoming.body.knownUrls) || incoming.knownUrls || [];\nconst category = (incoming.body && incoming.body.category) || incoming.category || (incoming.query && incoming.query.category) || 'Random';\n\nconst titlesExclusion = knownTitles.length > 0 ? '\\n\\nALREADY KNOWN TITLES TO EXCLUDE (DO NOT RETURN THESE):\\n- ' + knownTitles.join('\\n- ') : '';\nconst urlsExclusion = knownUrls.length > 0 ? '\\n\\nALREADY KNOWN URLS TO EXCLUDE:\\n- ' + knownUrls.join('\\n- ') : '';\n\nreturn [{\n  json: {\n    category,\n    logged_urls: content,\n    exclusion_prompt: titlesExclusion + urlsExclusion\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1136,
+        1376
+      ],
+      "id": "dd742c31-bb77-4e2f-a79b-ce07bf00c9db",
+      "name": "Read Logged URLs1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst output = [];\n\n// Helper supporting both older and newer n8n JS syntax versions\nfunction getFileName() {\n  // 1. Try Webhook1 trigger query parameters (Current workflow name)\n  try {\n    const w1 = $('Webhook1').first();\n    if (w1 && w1.json && w1.json.query && w1.json.query.fileName) {\n      return w1.json.query.fileName;\n    }\n  } catch (e) {}\n\n  // 2. Try Webhook trigger query parameters (Fallback name)\n  try {\n    const w = $('Webhook').first();\n    if (w && w.json && w.json.query && w.json.query.fileName) {\n      return w.json.query.fileName;\n    }\n  } catch (e) {}\n\n  // 3. Try Loop controller path\n  try {\n    const loopItem = $('Phase2_Extraction_Loop1').item;\n    if (loopItem && loopItem.json && loopItem.json.path) {\n      return loopItem.json.path.split('/').pop();\n    }\n  } catch (e) {}\n\n  try {\n    const loopItem2 = $('Phase2_Extraction_Loop').item;\n    if (loopItem2 && loopItem2.json && loopItem2.json.path) {\n      return loopItem2.json.path.split('/').pop();\n    }\n  } catch (e) {}\n\n  // 4. Try checking loop trigger input path\n  try {\n    const diskNode = $('Read/Write Files from Disk4').first();\n    if (diskNode && diskNode.json && diskNode.json.path) {\n      return diskNode.json.path.split('/').pop();\n    }\n  } catch (e) {}\n\n  return null;\n}\n\nlet pdfName = getFileName() || 'unknown_document.pdf';\n\n// Ensure it strictly retains the filename, never an arbitrary title string\nif (pdfName.endsWith('.pdf') === false && pdfName !== 'unknown_document.pdf') {\n  pdfName = pdfName + '.pdf';\n}\n\n// Find matching URL from downloaded_urls.txt if available\nlet sourceUrl = '';\ntry {\n  if (fs.existsSync('/data/downloaded_urls.txt')) {\n    const urlsContent = fs.readFileSync('/data/downloaded_urls.txt', 'utf8');\n    const urls = urlsContent.split('\\n').filter(Boolean);\n    const cleanPdfName = pdfName.replace(/\\.pdf$/i, '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();\n    const matched = urls.find(u => {\n      const cleanUrl = u.split('/').pop().replace(/\\.pdf$/i, '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();\n      return cleanUrl.includes(cleanPdfName) || cleanPdfName.includes(cleanUrl);\n    });\n    if (matched) {\n      sourceUrl = matched.trim();\n    }\n  }\n} catch (err) {}\n\n// Strict format: \"filename.pdf (source_url)\" or just \"filename.pdf\"\nconst sourceText = sourceUrl ? `${pdfName} (${sourceUrl})` : pdfName;\nconst processedDate = new Date().toLocaleString(\"de-DE\", { timeZone: \"Europe/Berlin\" });\n\nfor (const item of $input.all()) {\n  output.push({\n    json: {\n      \"Vorschlag\": item.json[\"Vorschlag\"] || \"\",\n      \"Exaktes Verbatim\": item.json[\"Exaktes Verbatim\"] || \"\",\n      \"Quelldokument\": sourceText,\n      \"Seitennummer\": item.json[\"Seitennummer\"] || \"\",\n      \"Kategorie\": item.json[\"Kategorie\"] || \"Sonstiges\",\n      \"Verarbeitungsdatum\": processedDate\n    }\n  });\n}\n\nreturn output;"
+      },
+      "id": "bdc54c6a-83fc-42b5-8495-9a1e3dd5cafc",
+      "name": "Parse JSON Output1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "extract-reforms",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1344,
+        896
+      ],
+      "id": "a4d65f1b-dc73-49f8-a3ea-2adaf01edceb",
+      "name": "Webhook1",
+      "webhookId": "4b448aa5-bc39-4236-bcff-8f1c5b32f231"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -1136,
+        896
+      ],
+      "id": "3ded6ee1-06d6-445d-a768-fbce31be5417",
+      "name": "Extract from File1"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        272,
+        880
+      ],
+      "id": "7853f725-db0d-41ff-b73d-82ed75524f40",
+      "name": "Convert to File1"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Act as a technical data extraction tool for German public administration and policy reforms.\nAnalyze this text: {{ $json.text }}\n\nTask: Extract every reform proposal, recommendation, and concrete structural/fiscal policy measure:\n1. Handlungsempfehlungen indicated by modal verbs (muss, müssen, sollte, sollen, ist erforderlich, bedarf, empfiehlt sich, etc.).\n2. Konkrete politische, fiskalische, gesetzliche oder administrative Reformmaßnahmen (z.B. Einführung, Abschaffung, Reformierung, Verlängerung, Anpassung, Kürzung, Anhebung, ist vorgesehen, wird umgesetzt).\n\nFor each extracted item:\n1. Extract the exact verbatim sentence from the PDF text and assign it to the \"Exaktes Verbatim\" key.\n2. Derive and formulate a well-structured, self-contained proposal in German using the surrounding context of the verbatim quote. It must include all necessary context so that the user can directly understand it without referring back to the original text. Assign it to the \"Vorschlag\" key.\n3. Identify the exact page number and assign it to the \"Seitennummer\" key.\n\nRules:\n- \"Exaktes Verbatim\" must be a direct verbatim quote from the text.\n- \"Vorschlag\" must be derived from the verbatim and context, fully readable and self-explanatory in German.",
+        "hasOutputParser": true,
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        -976,
+        896
+      ],
+      "id": "53b490b0-c5b8-40fc-94e2-98e1035e36d0",
+      "name": "Basic LLM Chain1",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.8-flash",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        -992,
+        1088
+      ],
+      "id": "1bdff21e-b69a-4129-97a4-9c8238200cbc",
+      "name": "Google Gemini Chat Model3",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "AuTDArtsvEcfk3ep",
+          "name": "Google Gemini(PaLM) Api account Sep"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"array\",\n  \"items\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"Vorschlag\": {\n        \"type\": \"string\",\n        \"description\": \"A well-formulated, context-enriched version of the recommendation in German, derived from the verbatim and its surrounding context, making it self-contained and easy to understand.\"\n      },\n      \"Exaktes Verbatim\": {\n        \"type\": \"string\",\n        \"description\": \"The exact verbatim recommendation sentence as it appears in the PDF text.\"\n      },\n      \"Quelldokument\": {\n        \"type\": \"string\"\n      },\n      \"Seitennummer\": {\n        \"type\": \"string\"\n      }\n    }\n  }\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        -816,
+        1088
+      ],
+      "id": "ac06b50b-63bc-437b-8d57-5053905d9d77",
+      "name": "Structured Output Parser1"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Act as a search agent. Search Tavily for 10 digital government policy documents, reform proposals, or strategy papers for and from Germany (für und aus Deutschland) matching the category: {{ $json.category }}.\n\nCRITICAL DEDUPLICATION REQUIREMENT:\nWe already have these documents in our repository. You MUST NOT return any of these documents, or mirror/alternate copies of these documents:{{ $json.exclusion_prompt }}\n\nRequirements:\n1. All documents must be newly published, with the oldest being from 2023 (neu veröffentlicht, ältestens aus dem Jahr 2023).\n2. When searching, you MUST search for direct PDF file links (e.g. use queries like 'category digitalisierung deutschland filetype:pdf' or 'pdf').\n3. Every returned url MUST be a direct download link to the PDF file (usually ending in .pdf) rather than a general webpage URL.\n4. Ensure every returned document is UNIQUE and distinct from the excluded titles above.\nReturn a JSON array of 10 objects, each containing:\n- \"title\": Clean descriptive title.\n- \"url\": The direct PDF download URL.\n- \"description\": A short summary of what the document is about.\nDo not download the files or run the HTTP Request tool.",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -928,
+        1376
+      ],
+      "id": "5c9ac0fa-7e59-4500-9229-38dae3e1a823",
+      "name": "AI Agent1",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.1-flash-lite",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        -1072,
+        1584
+      ],
+      "id": "b53ac1c6-8a04-4950-9655-4b580cf56a47",
+      "name": "Google Gemini Chat Model2",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "AuTDArtsvEcfk3ep",
+          "name": "Google Gemini(PaLM) Api account Sep"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "={{ $fromAI('query', '', 'string') }}",
+        "options": {}
+      },
+      "type": "@tavily/n8n-nodes-tavily.tavilyTool",
+      "typeVersion": 1,
+      "position": [
+        -784,
+        1536
+      ],
+      "id": "ae29d6a4-03d9-4bfe-96df-663ccc20fb83",
+      "name": "Search in Tavily1",
+      "credentials": {
+        "tavilyApi": {
+          "id": "EZ1tYibdgegkMGhY",
+          "name": "Tavily account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        464,
+        1056
+      ],
+      "id": "2ab717d9-9122-4cc1-a78f-90f6881dbeff",
+      "name": "Schedule Trigger3",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -1344,
+        1312
+      ],
+      "id": "94e2b027-c3f4-4e3f-adab-96b3d71b89c0",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $json.path }}",
+        "options": {
+          "fileName": "data"
+        }
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        1168,
+        1072
+      ],
+      "id": "a3bd20a0-f3ad-44af-8693-2ceca1b94169",
+      "name": "Read/Write Files from Disk4"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst path = require('path');\n\nconst directoryPath = '/data';\nconst output = [];\n\ntry {\n  // Read all files in the incoming directory\n  const files = fs.readdirSync(directoryPath);\n  \n  // Filter for PDFs and format for the n8n loop\n  files.forEach(file => {\n    if (path.extname(file).toLowerCase() === '.pdf') {\n      output.push({\n        json: {\n          path: path.join(directoryPath, file)\n        }\n      });\n    }\n  });\n} catch (err) {\n  throw new Error('Could not read directory /data/incoming: ' + err.message);\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        1056
+      ],
+      "id": "7f70edb6-4f38-4efe-8115-3f6ec95b394f",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1168,
+        864
+      ],
+      "id": "9026a39a-7b9c-4067-bae4-6cfd6af6b485",
+      "name": "No Operation, do nothing2"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        928,
+        1056
+      ],
+      "id": "9ef3a5fa-cdfa-4ab3-a758-56f34166cde9",
+      "name": "Phase2_Extraction_Loop1"
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "/data/extracted_reforms_database.csv",
+        "options": {
+          "append": true
+        }
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        464,
+        880
+      ],
+      "id": "075e5998-fdf6-42aa-8a2d-8ae0cee2e3d7",
+      "name": "Append to Master CSV1"
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "options": {}
+      },
+      "id": "58e020db-4a76-4d91-a78f-a3eaea501e75",
+      "name": "Respond to Webhook1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        464,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -592,
+        1376
+      ],
+      "id": "b22d874f-4990-4b64-985c-e1b222587f0c",
+      "name": "Respond to Scraper"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "discover-reforms",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1344,
+        1456
+      ],
+      "id": "a0b57438-55d2-4eea-8b47-1d0ae02f17b4",
+      "webhookId": "6c47a6cb-c9f2-45c9-bd8a-b55d94a32cfc",
+      "name": "Scraper Webhook"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "af6aedce-b2f7-4f5d-a474-6fa36be4f86e",
+              "leftValue": "={{ $('Webhook1').isExecuted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        640,
+        880
+      ],
+      "id": "ec9aa034-8022-4b5d-8f93-1efef6e2d78f",
+      "name": "Route Output"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Act as an automated data classification specialist for German digital government reforms.\n\nAnalyze the following list of extracted reform proposals:\n{{ $json.output.map((p, idx) => `ID ${idx}: \"${p.Vorschlag}\"`).join('\\n') }}\n\nYour task is to classify EACH proposal into exactly ONE of the following taxonomy categories:\n- IT-Infrastruktur\n- Organisation\n- Strategie\n- Personal\n- Gesetzgebung\n- Leistungen & Prozesse\n- Föderalismus\n- Governance\n- Sonstiges\n\nReturn a JSON array of objects with the assigned \"id\" and \"Kategorie\".",
+        "hasOutputParser": true,
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        -576,
+        896
+      ],
+      "id": "57c85c46-8e49-4b47-8189-00509c943aea",
+      "name": "Basic LLM Chain2",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"array\",\n  \"items\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"id\": {\n        \"type\": \"number\"\n      },\n      \"Kategorie\": {\n        \"type\": \"string\"\n      }\n    },\n    \"required\": [\"id\", \"Kategorie\"]\n  }\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        -416,
+        1088
+      ],
+      "id": "fcd41a52-a548-49f2-b720-3b69f8bcbde4",
+      "name": "Structured Output Parser2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const proposals = $('Aggregate Proposals').first().json.output || [];\nconst classifications = $input.first().json.output || [];\n\nconst categoryMap = {};\nclassifications.forEach(c => {\n  if (c && typeof c.id !== 'undefined') {\n    categoryMap[c.id] = c.Kategorie;\n  }\n});\n\nreturn proposals.map((p, idx) => ({\n  json: {\n    ...p,\n    Kategorie: categoryMap[idx] || \"Sonstiges\"\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        896
+      ],
+      "id": "da7e58ab-f142-4e5f-bb30-38448c2027a3",
+      "name": "Merge Categories1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst text = input.text || '';\nconst numpages = input.numpages || 1;\n\n// If 5 pages or fewer, process in 1 single shot\nif (numpages <= 5) {\n  return [{\n    json: {\n      text: text,\n      chunkIndex: 1,\n      totalChunks: 1,\n      startPage: 1,\n      endPage: numpages,\n      numpages: numpages\n    }\n  }];\n}\n\n// Split pages by form-feed character \\f\nlet pages = text.split('\\f');\nif (pages.length <= 1) {\n  // Fallback if form-feed is missing: split by estimated character blocks (~3000 chars per page)\n  const chunkSizeChars = 12000; // ~4 pages\n  const chunks = [];\n  for (let i = 0; i < text.length; i += chunkSizeChars) {\n    chunks.push(text.substring(i, i + chunkSizeChars));\n  }\n  return chunks.map((chunkText, idx) => ({\n    json: {\n      text: chunkText,\n      chunkIndex: idx + 1,\n      totalChunks: chunks.length,\n      startPage: (idx * 4) + 1,\n      endPage: Math.min((idx + 1) * 4, numpages),\n      numpages: numpages\n    }\n  }));\n}\n\n// Group into 4-page chunks\nconst CHUNK_SIZE = 4;\nconst output = [];\nconst totalChunks = Math.ceil(pages.length / CHUNK_SIZE);\n\nfor (let i = 0; i < pages.length; i += CHUNK_SIZE) {\n  const chunkPages = pages.slice(i, i + CHUNK_SIZE);\n  const startPage = i + 1;\n  const endPage = Math.min(i + CHUNK_SIZE, pages.length);\n  \n  // Format pages with explicit page headers for the LLM\n  const chunkText = chunkPages.map((pText, pIdx) => {\n    const pageNum = startPage + pIdx;\n    return `--- SEITE ${pageNum} ---\\n${pText.trim()}`;\n  }).join('\\n\\n');\n\n  output.push({\n    json: {\n      text: chunkText,\n      chunkIndex: Math.floor(i / CHUNK_SIZE) + 1,\n      totalChunks: totalChunks,\n      startPage: startPage,\n      endPage: endPage,\n      numpages: numpages\n    }\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -980,
+        700
+      ],
+      "id": "89b19c52-305b-4531-acda-449c2e0322f7",
+      "name": "Page-Chunking Router"
+    },
+    {
+      "parameters": {
+        "jsCode": "const allItems = $input.all();\nconst combinedProposals = [];\n\nfor (const item of allItems) {\n  const chunkProposals = item.json.output || [];\n  if (Array.isArray(chunkProposals)) {\n    for (const p of chunkProposals) {\n      if (p && (p.Vorschlag || p['Exaktes Verbatim'])) {\n        combinedProposals.push(p);\n      }\n    }\n  } else if (chunkProposals && typeof chunkProposals === 'object') {\n    combinedProposals.push(chunkProposals);\n  }\n}\n\n// Return 1 single item containing the complete array of proposals across all chunks\nreturn [{\n  json: {\n    output: combinedProposals,\n    totalProposals: combinedProposals.length\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        896
+      ],
+      "id": "9dc90d1c-7603-4cb3-aeaf-612c0e2b12b3",
+      "name": "Aggregate Proposals"
+    }
+  ],
+  "connections": {
+    "Read Logged URLs1": {
+      "main": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook1": {
+      "main": [
+        [
+          {
+            "node": "Extract from File1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File1": {
+      "main": [
+        [
+          {
+            "node": "Page-Chunking Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse JSON Output1": {
+      "main": [
+        [
+          {
+            "node": "Convert to File1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain1": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Proposals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model3": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser1": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Basic LLM Chain1",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent1": {
+      "main": [
+        [
+          {
+            "node": "Respond to Scraper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Basic LLM Chain2",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search in Tavily1": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Logged URLs1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read/Write Files from Disk4": {
+      "main": [
+        [
+          {
+            "node": "Extract from File1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger3": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File1": {
+      "main": [
+        [
+          {
+            "node": "Append to Master CSV1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Phase2_Extraction_Loop1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Phase2_Extraction_Loop1": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read/Write Files from Disk4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append to Master CSV1": {
+      "main": [
+        [
+          {
+            "node": "Route Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scraper Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read Logged URLs1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Output": {
+      "main": [
+        [
+          {
+            "node": "No Operation, do nothing2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Phase2_Extraction_Loop1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser2": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Basic LLM Chain2",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain2": {
+      "main": [
+        [
+          {
+            "node": "Merge Categories1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Categories1": {
+      "main": [
+        [
+          {
+            "node": "Parse JSON Output1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Page-Chunking Router": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Proposals": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "staticData": {
+    "node:Schedule Trigger1": {
+      "recurrenceRules": [
+        null
+      ],
+      "recurrenceRuleSignatures": [
+        null
+      ]
+    },
+    "node:Schedule Trigger2": {
+      "recurrenceRules": []
+    },
+    "node:Schedule Trigger": {
+      "recurrenceRules": [
+        null
+      ],
+      "recurrenceRuleSignatures": [
+        null
+      ]
+    }
+  }
+}

@@ -35,25 +35,50 @@ export function escapeCsvField(field: string): string {
 }
 
 export function parseCsvLine(line: string): string[] {
-  const row: string[] = [];
-  let inQuotes = false;
+  const rows = parseCsvRows(line);
+  return rows[0] || [];
+}
+
+export function parseCsvRows(csvText: string): string[][] {
+  const rows: string[][] = [];
+  let currentRow: string[] = [];
   let currentVal = '';
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
+  let inQuotes = false;
+
+  for (let i = 0; i < csvText.length; i++) {
+    const char = csvText[i];
     if (char === '"') {
-      if (inQuotes && line[i + 1] === '"') {
+      if (inQuotes && csvText[i + 1] === '"') {
         currentVal += '"';
         i++;
       } else {
         inQuotes = !inQuotes;
       }
     } else if (char === ',' && !inQuotes) {
-      row.push(currentVal);
+      currentRow.push(currentVal);
       currentVal = '';
+    } else if ((char === '\n' || char === '\r') && !inQuotes) {
+      if (char === '\r' && csvText[i + 1] === '\n') {
+        i++;
+      }
+      currentRow.push(currentVal);
+      currentVal = '';
+      if (currentRow.length > 1 || (currentRow.length === 1 && currentRow[0].trim() !== '')) {
+        rows.push(currentRow);
+      }
+      currentRow = [];
     } else {
       currentVal += char;
     }
   }
-  row.push(currentVal);
-  return row;
+
+  if (currentVal || currentRow.length > 0) {
+    currentRow.push(currentVal);
+    if (currentRow.length > 1 || (currentRow.length === 1 && currentRow[0].trim() !== '')) {
+      rows.push(currentRow);
+    }
+  }
+
+  return rows;
 }
+

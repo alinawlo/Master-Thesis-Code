@@ -35,7 +35,7 @@ import { PipelineStep, ProcessedDocument } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 import DeduplicationReview, { DeduplicationDecision } from './DeduplicationReview';
-import { DuplicateMatch, Proposal, parseCsvLine } from '../types/deduplication';
+import { DuplicateMatch, Proposal, parseCsvLine, parseCsvRows } from '../types/deduplication';
 
 interface PipelineProps {
   localFileName: string | null;
@@ -254,14 +254,13 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
       // Parse CSV to structured proposals
       const text = await blob.text();
       setRawCsvText(text);
-      const lines = text.trim().split('\n');
-      const nonHeaderLines = lines.filter(line => line.trim().length > 0);
+      const rows = parseCsvRows(text);
       
       const parsedProposals: Proposal[] = [];
       const currentDocName = localFileName || (selectedFile ? selectedFile.name : 'document.pdf');
 
-      for (let i = 1; i < nonHeaderLines.length; i++) {
-        const row = parseCsvLine(nonHeaderLines[i]);
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
         if (row.length >= 4) {
           const rawSource = (row[2] || '').trim();
           let quelldokument = currentDocName;
@@ -285,7 +284,7 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
       addLog(`Parsed CSV: Found ${count} proposal(s).`);
 
       if (count === 0) {
-        const zeroError = `Extraction failed: 0 proposals were extracted from "${currentDocName}". A pipeline error may have occurred in n8n (e.g. Classification Agent service unavailable).`;
+        const zeroError = `Extraction failed: 0 proposals were extracted from "${currentDocName}". A pipeline error may have occurred in n8n (e.g. LLM service unavailable).`;
         addLog(`[Error] ${zeroError}`);
         setErrorMessage(zeroError);
         setIsProcessing(false);
