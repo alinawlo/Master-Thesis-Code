@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   GitMerge, 
   CopyPlus, 
@@ -18,7 +19,6 @@ import {
 } from '@/src/components/ui/card';
 import { Button } from '@/src/components/ui/button';
 import { Badge } from '@/src/components/ui/badge';
-import { motion } from 'motion/react';
 import { DuplicateMatch, Proposal } from '../types/deduplication';
 
 export interface DeduplicationDecision {
@@ -98,18 +98,12 @@ export default function DeduplicationReview({
   const keepCount = Object.values(decisions).filter(a => a === 'keep').length;
   const unselectedCount = duplicates.length - mergeCount - keepCount;
 
-  return (
+  return createPortal(
     <div 
-      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      className="fixed inset-0 z-[9999] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6"
     >
-      <motion.div 
-        initial={{ opacity: 0, scale: 0.98, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.98, y: 8 }}
-        className="bg-white text-zinc-900 border border-zinc-200 rounded-2xl shadow-2xl max-w-4xl w-full h-[85vh] flex flex-col overflow-hidden"
+      <div 
+        className="bg-white text-zinc-900 border border-zinc-200 rounded-2xl shadow-2xl max-w-4xl w-full h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150"
       >
         {/* Modal Header */}
         <div className="px-6 py-4 border-b border-indigo-100 flex items-center justify-between bg-gradient-to-r from-indigo-50/40 via-white to-purple-50/30 shrink-0">
@@ -226,7 +220,7 @@ export default function DeduplicationReview({
                       {similarityPercent}% Match
                     </span>
                     <span className="text-[11px] font-medium px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-700 border border-zinc-200">
-                      {item.incoming.kategorie}
+                      {item.incoming?.kategorie || 'Sonstiges'}
                     </span>
                   </div>
 
@@ -273,14 +267,14 @@ export default function DeduplicationReview({
                           New Candidate Proposal
                         </span>
                         <span className="text-[10px] text-sky-800 bg-sky-100/90 px-1.5 py-0.5 rounded font-mono font-semibold">
-                          Page {item.incoming.seitennummer || 'N/A'}
+                          Page {item.incoming?.seitennummer || 'N/A'}
                         </span>
                       </div>
                       <p className="text-xs font-medium leading-relaxed text-zinc-900">
-                        {item.incoming.vorschlag}
+                        {item.incoming?.vorschlag || ''}
                       </p>
-                      <div className="pt-2 border-t border-sky-200/60 text-[10px] text-zinc-600 truncate" title={item.incoming.quelldokument}>
-                        <span className="font-semibold text-sky-900">Source:</span> {item.incoming.quelldokument}
+                      <div className="pt-2 border-t border-sky-200/60 text-[10px] text-zinc-600 truncate" title={item.incoming?.quelldokument}>
+                        <span className="font-semibold text-sky-900">Source:</span> {item.incoming?.quelldokument || 'Unknown'}
                       </div>
                     </div>
 
@@ -292,14 +286,14 @@ export default function DeduplicationReview({
                           Existing Database Entry
                         </span>
                         <span className="text-[10px] text-slate-700 bg-slate-200/80 px-1.5 py-0.5 rounded font-mono font-semibold">
-                          Page {item.existing.seitennummer || 'N/A'}
+                          Page {item.existing?.seitennummer || 'N/A'}
                         </span>
                       </div>
                       <p className="text-xs font-medium leading-relaxed text-zinc-600">
-                        {item.existing.vorschlag}
+                        {item.existing?.vorschlag || ''}
                       </p>
-                      <div className="pt-2 border-t border-slate-200/60 text-[10px] text-zinc-600 truncate" title={item.existing.quelldokument}>
-                        <span className="font-semibold text-slate-900">Source:</span> {item.existing.quelldokument}
+                      <div className="pt-2 border-t border-slate-200/60 text-[10px] text-zinc-600 truncate" title={item.existing?.quelldokument}>
+                        <span className="font-semibold text-slate-900">Source:</span> {item.existing?.quelldokument || 'Unknown'}
                       </div>
                     </div>
                   </div>
@@ -355,7 +349,7 @@ export default function DeduplicationReview({
             <Button 
               variant="outline" 
               size="sm" 
-              onClick={onClose}
+              onClick={onClose} 
               className="border-zinc-300 text-zinc-700 hover:bg-zinc-100"
             >
               Cancel
@@ -370,7 +364,8 @@ export default function DeduplicationReview({
             </Button>
           </div>
         </div>
-      </motion.div>
-    </div>
+      </div>
+    </div>,
+    document.body
   );
 }

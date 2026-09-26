@@ -97,7 +97,9 @@ export default defineConfig({
                     throw new Error('proposals array is required.');
                   }
                   const csvsDir = path.resolve(__dirname, './csvs');
+                  console.log(`[DEBUG SERVER check-duplicates] Starting with ${proposals.length} proposals, threshold=${threshold}`);
                   const result = await checkDuplicates(proposals, csvsDir, threshold || 0.85);
+                  console.log(`[DEBUG SERVER check-duplicates] Done: ${result.duplicates.length} duplicates, ${result.unique.length} unique`);
                   res.writeHead(200, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ 
                     success: true, 
@@ -105,6 +107,7 @@ export default defineConfig({
                     unique: result.unique 
                   }));
                 } catch (err: any) {
+                  console.error(`[DEBUG SERVER check-duplicates] ERROR:`, err.message);
                   res.writeHead(400, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ error: err.message }));
                 }
@@ -190,6 +193,44 @@ export default defineConfig({
                   
                   // Rebuild master copy in Thesis folder
                   rebuildMasterCsv();
+
+                  // 3. Move processed document and record SHA-256 hash upon confirmed save
+                  if (payload.documentFileName) {
+                    const docName = String(payload.documentFileName).trim();
+                    const filesDir = '/Users/ali/Desktop/Master Thesis/files';
+                    const processedDir = path.join(filesDir, 'processed files');
+                    if (!fs.existsSync(processedDir)) {
+                      fs.mkdirSync(processedDir, { recursive: true });
+                    }
+                    const origPath = path.join(filesDir, docName);
+                    const destPath = path.join(processedDir, docName);
+                    if (fs.existsSync(origPath) && origPath !== destPath) {
+                      try {
+                        fs.renameSync(origPath, destPath);
+                        console.log(`[save-csv] Moved "${docName}" to processed files folder.`);
+                      } catch {
+                        try {
+                          fs.copyFileSync(origPath, destPath);
+                          fs.unlinkSync(origPath);
+                        } catch (errCopy) {
+                          console.error(`[save-csv] Error moving ${docName}:`, errCopy);
+                        }
+                      }
+                    }
+                    const targetFileForHash = fs.existsSync(destPath) ? destPath : (fs.existsSync(origPath) ? origPath : null);
+                    if (targetFileForHash) {
+                      const fileBuffer = fs.readFileSync(targetFileForHash);
+                      const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+                      const processedHashes = loadProcessedHashes(csvsDir);
+                      processedHashes[docName] = {
+                        hash,
+                        fileName: docName,
+                        processedAt: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+                      };
+                      saveProcessedHashes(csvsDir, processedHashes);
+                      console.log(`[save-csv] Recorded processed hash for "${docName}".`);
+                    }
+                  }
                   
                   res.writeHead(200, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ success: true }));
@@ -607,6 +648,8 @@ export default defineConfig({
                   const startTime = Date.now();
                   const startedAt = new Date().toISOString();
 
+                  console.log(`[DEBUG SERVER extract-local-pdf] Sending to n8n: "${fileName}" force=${force}`);
+
                   let n8nRes: Response;
                   try {
                     n8nRes = await fetch(`http://localhost:5678/webhook/extract-reforms?fileName=${encodeURIComponent(fileName)}`, {
@@ -614,6 +657,7 @@ export default defineConfig({
                       body: formData
                     });
                   } catch (fetchErr: any) {
+                    console.error(`[DEBUG SERVER extract-local-pdf] n8n fetch FAILED:`, fetchErr.message);
                     logExtractionExecution({
                       executionId: `err_${Date.now()}`,
                       fileName,
@@ -628,6 +672,7 @@ export default defineConfig({
                     throw fetchErr;
                   }
 
+                  console.log(`[DEBUG SERVER extract-local-pdf] n8n responded: status=${n8nRes.status}`);
                   const executionIdHeader = n8nRes.headers.get('x-n8n-execution-id') || `${Date.now()}`;
 
                   if (!n8nRes.ok) {
@@ -655,6 +700,7 @@ export default defineConfig({
 
                   const arrayBuffer = await n8nRes.arrayBuffer();
                   const csvText = Buffer.from(arrayBuffer).toString('utf8');
+                  console.log(`[DEBUG SERVER extract-local-pdf] CSV received, length=${csvText.length} bytes`);
 
                   // Check if response is an error JSON payload from n8n
                   try {
@@ -682,6 +728,7 @@ export default defineConfig({
 
                   // Validate CSV content: must contain header + at least 1 proposal row
                   const parsedRows = parseCsvRows(csvText);
+                  console.log(`[DEBUG SERVER extract-local-pdf] Parsed ${parsedRows.length} CSV rows (incl header)`);
                   if (parsedRows.length <= 1) {
                     console.warn(`Extraction yielded 0 proposals for "${fileName}". Keeping document in original location.`);
                     const errorMsg = `Extraction failed: n8n returned 0 proposals for "${fileName}". A backend node may have failed (e.g. LLM service unavailable).`;
@@ -719,30 +766,7 @@ export default defineConfig({
                     timestamp: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
                   });
 
-                  // Record processed document keyed by fileName ONLY when proposals are extracted
-                  processedHashes[fileName] = {
-                    hash: fileHash,
-                    fileName,
-                    processedAt: new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
-                  };
-                  saveProcessedHashes(csvsDir, processedHashes);
-
-                  // Move file to "processed files" folder
-                  const destPath = path.join(processedDir, fileName);
-                  if (fs.existsSync(filePath) && filePath !== destPath) {
-                    try {
-                      fs.renameSync(filePath, destPath);
-                      console.log(`Moved "${fileName}" to processed files folder.`);
-                    } catch (mvErr) {
-                      try {
-                        fs.copyFileSync(filePath, destPath);
-                        fs.unlinkSync(filePath);
-                      } catch (copyErr) {
-                        console.error(`Error moving ${fileName} to processed files:`, copyErr);
-                      }
-                    }
-                  }
-
+                  console.log(`[DEBUG SERVER extract-local-pdf] SUCCESS: Responding with ${proposalsCount} proposals CSV`);
                   res.writeHead(200, { 
                     'Content-Type': 'text/csv',
                     'Content-Disposition': `attachment; filename="reforms_${fileName.replace('.pdf', '')}.csv"`
@@ -972,6 +996,19 @@ export default defineConfig({
   server: {
     port: 3000,
     host: "0.0.0.0",
+    watch: {
+      ignored: [
+        '**/csvs/**',
+        '**/workflows/**',
+        '**/scratch/**',
+        '**/.embeddings_cache.json',
+        '**/.processed_hashes.json',
+        '**/.known_documents.json',
+        '**/execution_history.json',
+        '**/*.csv',
+        /(csvs|workflows|scratch)/
+      ]
+    },
     proxy: {
       '/webhook': {
         target: 'http://localhost:5678',

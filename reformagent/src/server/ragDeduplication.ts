@@ -171,7 +171,7 @@ export function loadExistingProposals(csvsDir: string): ExistingProposal[] {
 export async function checkDuplicates(
   incomingProposals: Proposal[],
   csvsDir: string,
-  threshold: number = 0.85
+  threshold: number = 0.78
 ): Promise<CheckDuplicatesResult> {
   const existingProposals = loadExistingProposals(csvsDir);
   const cache = loadEmbeddingsCache(csvsDir);

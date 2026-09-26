@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   Upload, 
   FileText, 
@@ -36,6 +37,55 @@ import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 import DeduplicationReview, { DeduplicationDecision } from './DeduplicationReview';
 import { DuplicateMatch, Proposal, parseCsvLine, parseCsvRows } from '../types/deduplication';
+
+class DeduplicationErrorBoundary extends React.Component<
+  { children: React.ReactNode; onReset: () => void },
+  { hasError: boolean; error: Error | null }
+> {
+  state = { hasError: false, error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("DeduplicationReview render error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="fixed inset-0 z-[9999] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-lg w-full space-y-4 shadow-2xl border border-red-200">
+            <div className="flex items-center gap-3 text-red-600 font-bold text-base">
+              <AlertCircle className="w-5 h-5 shrink-0" />
+              <span>Review Modal Rendering Error</span>
+            </div>
+            <p className="text-xs text-zinc-600">
+              An error occurred while displaying the proposal review dialog:
+            </p>
+            <pre className="text-[11px] font-mono bg-red-50 p-3 rounded-lg text-red-700 border border-red-100 overflow-x-auto whitespace-pre-wrap">
+              {this.state.error?.message || 'Unknown error'}
+            </pre>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  this.setState({ hasError: false, error: null });
+                  this.props.onReset();
+                }}
+              >
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 interface PipelineProps {
   localFileName: string | null;
@@ -144,12 +194,14 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
     
     addLog(`Saving ${merges.length} merged proposal(s) and ${allNewProposals.length} new proposal(s) to master database...`);
     
+    const currentDocName = localFileName || (selectedFile ? selectedFile.name : fileName);
     try {
       const saveResponse = await fetch('/api/save-csv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           fileName: targetFileName,
+          documentFileName: currentDocName,
           newProposals: allNewProposals,
           merges: merges
         })
@@ -159,7 +211,8 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
         addLog("Success: Deduplication choices saved and master CSV updated.");
         toast.success(`Saved ${allNewProposals.length} new proposals and merged ${merges.length} sources.`);
         setProposalCount(allPickedProposals.length);
-        if (onDocumentProcessed) onDocumentProcessed(fileName);
+        if (onDocumentProcessed) onDocumentProcessed(currentDocName);
+        setIsProcessing(false);
         setStep('results');
       } else {
         const errJson = await saveResponse.json();
@@ -238,18 +291,7 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
       const blob = await response.blob();
       addLog("n8n: Extraction completed, analyzing returned data...");
       setProgress(75);
-
-      if (selectedFile) {
-        try {
-          await fetch('/api/record-processed-document', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ fileName: selectedFile.name })
-          });
-        } catch (recErr) {
-          console.error("Failed to record processed document:", recErr);
-        }
-      }
+      console.log('[DEBUG Pipeline] n8n response received, blob size:', blob.size);
 
       // Parse CSV to structured proposals
       const text = await blob.text();
@@ -301,7 +343,7 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
       const dedupRes = await fetch('/api/check-duplicates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ proposals: parsedProposals, threshold: 0.85 })
+        body: JSON.stringify({ proposals: parsedProposals, threshold: 0.78 })
       });
 
       setProgress(100);
@@ -315,6 +357,7 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
           addLog(`RAG Analysis: Found ${duplicates.length} semantic duplicate(s) and ${unique.length} unique proposal(s).`);
           setPendingDuplicates(duplicates);
           setPendingUnique(unique);
+          setIsProcessing(false);
           setIsReviewModalOpen(true);
           // Wait for user modal decision
           return;
@@ -335,13 +378,15 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
         },
         body: JSON.stringify({
           fileName: targetFileName,
+          documentFileName: currentDocName,
           newProposals: parsedProposals
         })
       });
 
       if (saveResponse.ok) {
         addLog("Success: Saved proposals to reforms_master.csv and updated thesis database.");
-        if (onDocumentProcessed) onDocumentProcessed(fileName);
+        if (onDocumentProcessed) onDocumentProcessed(currentDocName);
+        setIsProcessing(false);
         const chosenBlob = generateProposalsCsv(parsedProposals);
         setCsvBlob(chosenBlob);
         setStep('results');
@@ -614,47 +659,51 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
         </div>
       </div>
 
-      <DeduplicationReview
-        isOpen={isReviewModalOpen}
-        onClose={() => {
-          setIsReviewModalOpen(false);
-          setIsProcessing(false);
-        }}
-        duplicates={pendingDuplicates}
-        uniqueProposals={pendingUnique}
-        onConfirm={handleDeduplicationConfirm}
-      />
+      <DeduplicationErrorBoundary onReset={() => {
+        setIsReviewModalOpen(false);
+        setIsProcessing(false);
+      }}>
+        <DeduplicationReview
+          isOpen={isReviewModalOpen}
+          onClose={() => {
+            setIsReviewModalOpen(false);
+            setIsProcessing(false);
+          }}
+          duplicates={pendingDuplicates}
+          uniqueProposals={pendingUnique}
+          onConfirm={handleDeduplicationConfirm}
+        />
+      </DeduplicationErrorBoundary>
 
-      {duplicateWarning && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/10 backdrop-blur-[2px] p-4 animate-in fade-in duration-150">
-          <div className="bg-white border border-zinc-200/90 rounded-2xl shadow-xl max-w-md w-full p-5 space-y-4">
+      {duplicateWarning && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="bg-white border border-zinc-200/90 rounded-2xl shadow-2xl max-w-md w-full p-5 space-y-4">
             <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-xl bg-sky-50 text-sky-600 border border-sky-100 flex items-center justify-center shrink-0">
+              <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 border border-amber-100 flex items-center justify-center shrink-0">
                 <FileText className="w-5 h-5" />
               </div>
               <div className="flex-1 min-w-0">
                 <h3 className="text-sm font-semibold text-zinc-900">
-                  Document Already Processed
+                  Duplicate Document Detected
                 </h3>
                 <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                  This document's content matches{' '}
+                  This file is identical to{' '}
                   <span className="font-semibold text-zinc-900 font-mono">
-                    "{duplicateWarning.previousFileName || 'previous file'}"
+                    "{duplicateWarning.previousFileName || 'previously extracted file'}"
                   </span>
                   {duplicateWarning.processedAt && (
                     <>
-                      , extracted on{' '}
+                      {' '}(extracted on{' '}
                       <span className="font-semibold text-zinc-800">
                         {duplicateWarning.processedAt}
-                      </span>
+                      </span>)
                     </>
                   )}.
                 </p>
+                <p className="text-xs text-zinc-800 font-medium mt-2">
+                  Do you want to extract anyway to test proposal deduplication?
+                </p>
               </div>
-            </div>
-
-            <div className="bg-zinc-50 border border-zinc-200/70 rounded-xl p-3 text-xs text-zinc-600 leading-relaxed">
-              Extracting again will run the extraction pipeline and register this file as a separate document in your processed history.
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-1">
@@ -662,7 +711,11 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
                 variant="outline"
                 size="sm"
                 className="h-8 text-xs font-medium px-3 border-zinc-200 text-zinc-700 hover:bg-zinc-100"
-                onClick={() => setDuplicateWarning(null)}
+                onClick={() => {
+                  setDuplicateWarning(null);
+                  setIsProcessing(false);
+                  setProgress(0);
+                }}
               >
                 Cancel
               </Button>
@@ -675,11 +728,12 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
                 }}
               >
                 <RefreshCw className="w-3.5 h-3.5" />
-                Force Re-extract
+                Extract Anyway
               </Button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
