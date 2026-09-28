@@ -16,6 +16,7 @@ import {
   parseCsvRows,
   loadProcessedHashes, 
   saveProcessedHashes,
+  syncProcessedHashesWithDisk,
   loadKnownDocumentsRegistry,
   registerDocumentEntry,
   getAllKnownTitlesAndUrls
@@ -252,7 +253,7 @@ export default defineConfig({
                 return;
               }
               const csvsDir = path.resolve(__dirname, './csvs');
-              const processedHashes = loadProcessedHashes(csvsDir);
+              const processedHashes = syncProcessedHashesWithDisk(csvsDir, filesDir);
               const processedFileNames = new Set(Object.values(processedHashes).map(p => p.fileName));
               const processedDir = path.join(filesDir, 'processed files');
               if (fs.existsSync(processedDir)) {
@@ -266,7 +267,8 @@ export default defineConfig({
               const pdfs = files.filter(file => {
                 const fullPath = path.join(filesDir, file);
                 try {
-                  return fs.statSync(fullPath).isFile() && 
+                  return !file.startsWith('.') &&
+                         fs.statSync(fullPath).isFile() && 
                          path.extname(file).toLowerCase() === '.pdf' &&
                          !processedFileNames.has(file);
                 } catch {
@@ -326,53 +328,16 @@ export default defineConfig({
           } else if (req.url === '/api/list-processed-documents' && req.method === 'GET') {
             try {
               const csvsDir = path.resolve(__dirname, './csvs');
-              const processedHashes = loadProcessedHashes(csvsDir);
               const filesDir = '/Users/ali/Desktop/Master Thesis/files';
-              const processedDir = path.join(filesDir, 'processed files');
-              if (!fs.existsSync(processedDir)) {
-                fs.mkdirSync(processedDir, { recursive: true });
-              }
-              
-              // Sync files physically in "processed files" folder into processedHashes if missing
-              if (fs.existsSync(processedDir)) {
-                const pFiles = fs.readdirSync(processedDir);
-                let cacheUpdated = false;
-                for (const pf of pFiles) {
-                  const fullPf = path.join(processedDir, pf);
-                  try {
-                    if (fs.statSync(fullPf).isFile() && path.extname(pf).toLowerCase() === '.pdf') {
-                      const alreadyHashed = Object.values(processedHashes).some(v => v.fileName === pf);
-                      if (!alreadyHashed) {
-                        const buf = fs.readFileSync(fullPf);
-                        const h = crypto.createHash('sha256').update(buf).digest('hex');
-                        const stat = fs.statSync(fullPf);
-                        processedHashes[pf] = {
-                          hash: h,
-                          fileName: pf,
-                          processedAt: stat.mtime.toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
-                        };
-                        cacheUpdated = true;
-                      }
-                    }
-                  } catch (e) {
-                    // ignore stat error
-                  }
-                }
-                if (cacheUpdated) {
-                  saveProcessedHashes(csvsDir, processedHashes);
-                }
-              }
+              const processedHashes = syncProcessedHashesWithDisk(csvsDir, filesDir);
 
-              const docs = Object.values(processedHashes).map(info => {
-                const fileExists = fs.existsSync(path.join(processedDir, info.fileName));
-                return {
-                  id: info.fileName,
-                  hash: info.hash,
-                  fileName: info.fileName,
-                  processedAt: info.processedAt,
-                  hasFile: fileExists
-                };
-              });
+              const docs = Object.values(processedHashes).map(info => ({
+                id: info.fileName,
+                hash: info.hash,
+                fileName: info.fileName,
+                processedAt: info.processedAt,
+                hasFile: true
+              }));
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(docs));
             } catch (err: any) {
@@ -624,7 +589,7 @@ export default defineConfig({
 
                   // Check SHA-256 hash for document-level deduplication
                   const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-                  const processedHashes = loadProcessedHashes(csvsDir);
+                  const processedHashes = syncProcessedHashesWithDisk(csvsDir, filesDir);
 
                   const duplicateDoc = Object.values(processedHashes).find(p => p.hash === fileHash);
 

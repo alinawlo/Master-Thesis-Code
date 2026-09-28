@@ -228,11 +228,11 @@ export default function DeduplicationReview({
                   <div className="flex items-center gap-2">
                     <Button
                       size="sm"
-                      variant="outline"
+                      variant={currentAction === 'merge' ? 'default' : 'outline'}
                       className={`h-8 px-3 text-xs font-semibold rounded-lg gap-1.5 transition-all cursor-pointer ${
                         currentAction === 'merge'
-                          ? 'bg-violet-600 hover:bg-violet-700 text-white border-violet-600 shadow-sm'
-                          : 'bg-white hover:bg-violet-50 text-violet-700 border-violet-200 hover:border-violet-300'
+                          ? '!bg-violet-600 hover:!bg-violet-700 !text-white !border-violet-600 shadow-sm'
+                          : '!bg-white hover:!bg-violet-50 !text-violet-700 !border-violet-200 hover:!border-violet-300'
                       }`}
                       onClick={() => toggleAction(idx, 'merge')}
                     >
@@ -242,11 +242,11 @@ export default function DeduplicationReview({
                     </Button>
                     <Button
                       size="sm"
-                      variant="outline"
+                      variant={currentAction === 'keep' ? 'default' : 'outline'}
                       className={`h-8 px-3 text-xs font-semibold rounded-lg gap-1.5 transition-all cursor-pointer ${
                         currentAction === 'keep'
-                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-600 shadow-sm'
-                          : 'bg-white hover:bg-emerald-50 text-emerald-700 border-emerald-200 hover:border-emerald-300'
+                          ? '!bg-emerald-600 hover:!bg-emerald-700 !text-white !border-emerald-600 shadow-sm'
+                          : '!bg-white hover:!bg-emerald-50 !text-emerald-700 !border-emerald-200 hover:!border-emerald-300'
                       }`}
                       onClick={() => toggleAction(idx, 'keep')}
                     >

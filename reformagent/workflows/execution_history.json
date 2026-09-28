@@ -1,5 +1,27 @@
 [
   {
+    "executionId": "1790419709210",
+    "fileName": "pd2.pdf",
+    "status": "success",
+    "startedAt": "2026-09-26T10:48:12.636Z",
+    "stoppedAt": "2026-09-26T10:48:29.217Z",
+    "durationMs": 16581,
+    "proposalsCount": 10,
+    "error": null,
+    "timestamp": "26.9.2026, 12:48:29"
+  },
+  {
+    "executionId": "1790418210896",
+    "fileName": "bdi_agenda_einfachstaat_260303_online.pdf",
+    "status": "success",
+    "startedAt": "2026-09-26T10:21:17.045Z",
+    "stoppedAt": "2026-09-26T10:23:30.927Z",
+    "durationMs": 133882,
+    "proposalsCount": 284,
+    "error": null,
+    "timestamp": "26.9.2026, 12:23:30"
+  },
+  {
     "executionId": "1790417214094",
     "fileName": "pdf5.pdf",
     "status": "success",

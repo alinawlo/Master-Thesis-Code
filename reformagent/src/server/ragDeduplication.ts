@@ -137,6 +137,80 @@ export function saveProcessedHashes(
   }
 }
 
+export function syncProcessedHashesWithDisk(
+  csvsDir: string,
+  filesDir: string = '/Users/ali/Desktop/Master Thesis/files'
+): Record<string, { hash: string; fileName: string; processedAt: string }> {
+  const processedHashes = loadProcessedHashes(csvsDir);
+  const processedDir = path.join(filesDir, 'processed files');
+
+  if (!fs.existsSync(processedDir)) {
+    try {
+      fs.mkdirSync(processedDir, { recursive: true });
+    } catch {}
+    return processedHashes;
+  }
+
+  let modified = false;
+
+  // 1. Get all PDF files actually currently present in "processed files" on disk
+  const diskFiles: string[] = [];
+  try {
+    const rawFiles = fs.readdirSync(processedDir);
+    for (const f of rawFiles) {
+      if (f.startsWith('.') || !f.toLowerCase().endsWith('.pdf')) continue;
+      try {
+        if (fs.statSync(path.join(processedDir, f)).isFile()) {
+          diskFiles.push(f);
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.error('Error reading processedDir:', err);
+    return processedHashes;
+  }
+
+  const diskFileSet = new Set(diskFiles);
+
+  // 2. Remove entries for files that no longer exist in "processed files" on disk
+  for (const [key, entry] of Object.entries(processedHashes)) {
+    const fileName = entry.fileName || key;
+    if (!diskFileSet.has(fileName)) {
+      delete processedHashes[key];
+      modified = true;
+    }
+  }
+
+  // 3. Add or update hashes for files currently on disk
+  for (const fileName of diskFiles) {
+    const fullPath = path.join(processedDir, fileName);
+    try {
+      const stat = fs.statSync(fullPath);
+      const existing = processedHashes[fileName];
+
+      // If missing or hash is empty, compute hash
+      if (!existing || !existing.hash) {
+        const buf = fs.readFileSync(fullPath);
+        const hash = crypto.createHash('sha256').update(buf).digest('hex');
+        processedHashes[fileName] = {
+          hash,
+          fileName,
+          processedAt: stat.mtime.toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
+        };
+        modified = true;
+      }
+    } catch (e) {
+      // skip unreadable file
+    }
+  }
+
+  if (modified) {
+    saveProcessedHashes(csvsDir, processedHashes);
+  }
+
+  return processedHashes;
+}
+
 export function loadExistingProposals(csvsDir: string): ExistingProposal[] {
   const proposals: ExistingProposal[] = [];
   if (!fs.existsSync(csvsDir)) return proposals;
