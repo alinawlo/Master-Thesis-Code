@@ -245,24 +245,46 @@ export function loadExistingProposals(csvsDir: string): ExistingProposal[] {
 export async function checkDuplicates(
   incomingProposals: Proposal[],
   csvsDir: string,
-  threshold: number = 0.78
+  thresholdParam: number | { lowerThreshold?: number; upperThreshold?: number } = 0.78
 ): Promise<CheckDuplicatesResult> {
+  let lowerThreshold = 0.75;
+  let upperThreshold = 0.88;
+
+  if (typeof thresholdParam === 'number') {
+    lowerThreshold = thresholdParam;
+    upperThreshold = Math.max(0.88, thresholdParam);
+  } else if (thresholdParam && typeof thresholdParam === 'object') {
+    lowerThreshold = thresholdParam.lowerThreshold ?? 0.75;
+    upperThreshold = thresholdParam.upperThreshold ?? 0.88;
+  }
+
   const existingProposals = loadExistingProposals(csvsDir);
   const cache = loadEmbeddingsCache(csvsDir);
   let cacheModified = false;
 
-  // 1. Ensure all existing proposals have embeddings in cache
-  for (const existing of existingProposals) {
-    const key = hashText(existing.vorschlag);
-    if (!cache[key]) {
-      try {
-        const emb = await getEmbedding(existing.vorschlag);
-        cache[key] = { embedding: emb, vorschlag: existing.vorschlag };
-        cacheModified = true;
-      } catch (err) {
-        console.error(`Failed to embed existing proposal "${existing.vorschlag.substring(0, 30)}...":`, err);
-      }
+  // Helper to get or compute embedding with caching
+  const getCachedEmbedding = async (text: string): Promise<number[] | null> => {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return null;
+    const key = hashText(trimmed);
+    if (cache[key]?.embedding) {
+      return cache[key].embedding;
     }
+    try {
+      const emb = await getEmbedding(trimmed);
+      cache[key] = { embedding: emb, vorschlag: trimmed };
+      cacheModified = true;
+      return emb;
+    } catch (err) {
+      console.error(`Failed to embed "${trimmed.substring(0, 30)}...":`, err);
+      return null;
+    }
+  };
+
+  // 1. Ensure all existing proposals have embeddings in cache for both vorschlag and verbatim
+  for (const existing of existingProposals) {
+    if (existing.vorschlag) await getCachedEmbedding(existing.vorschlag);
+    if (existing.verbatim) await getCachedEmbedding(existing.verbatim);
   }
 
   if (cacheModified) {
@@ -271,24 +293,16 @@ export async function checkDuplicates(
   }
 
   const duplicates: DuplicateMatch[] = [];
+  const autoMergeDuplicates: DuplicateMatch[] = [];
+  const reviewDuplicates: DuplicateMatch[] = [];
   const unique: Proposal[] = [];
 
-  // 2. Embed each incoming proposal and compare with existing proposals
+  // 2. Embed each incoming proposal and compare with existing proposals (Dual-Signal: max(simVorschlag, simVerbatim))
   for (const incoming of incomingProposals) {
-    const incomingKey = hashText(incoming.vorschlag);
-    let incomingEmb = cache[incomingKey]?.embedding;
+    const incomingVorschlagEmb = incoming.vorschlag ? await getCachedEmbedding(incoming.vorschlag) : null;
+    const incomingVerbatimEmb = incoming.verbatim ? await getCachedEmbedding(incoming.verbatim) : null;
 
-    if (!incomingEmb) {
-      try {
-        incomingEmb = await getEmbedding(incoming.vorschlag);
-        cache[incomingKey] = { embedding: incomingEmb, vorschlag: incoming.vorschlag };
-        cacheModified = true;
-      } catch (err) {
-        console.error(`Failed to embed incoming proposal "${incoming.vorschlag.substring(0, 30)}...":`, err);
-      }
-    }
-
-    if (!incomingEmb) {
+    if (!incomingVorschlagEmb && !incomingVerbatimEmb) {
       unique.push(incoming);
       continue;
     }
@@ -297,26 +311,56 @@ export async function checkDuplicates(
     let bestMatch: ExistingProposal | null = null;
 
     for (const existing of existingProposals) {
-      const existingKey = hashText(existing.vorschlag);
-      const existingEmb = cache[existingKey]?.embedding;
-      if (existingEmb) {
-        const sim = cosineSimilarity(incomingEmb, existingEmb);
-        if (sim > maxSim) {
-          maxSim = sim;
-          bestMatch = existing;
+      let simVorschlag = 0;
+      let simVerbatim = 0;
+
+      if (incomingVorschlagEmb && existing.vorschlag) {
+        const existingKey = hashText(existing.vorschlag);
+        const existingEmb = cache[existingKey]?.embedding;
+        if (existingEmb) {
+          simVorschlag = cosineSimilarity(incomingVorschlagEmb, existingEmb);
         }
+      }
+
+      if (incomingVerbatimEmb && existing.verbatim) {
+        const existingKey = hashText(existing.verbatim);
+        const existingEmb = cache[existingKey]?.embedding;
+        if (existingEmb) {
+          simVerbatim = cosineSimilarity(incomingVerbatimEmb, existingEmb);
+        }
+      }
+
+      // Dual-signal: match is high if either the synthesized reform statement OR the verbatim quote matches
+      const combinedSim = Math.max(simVorschlag, simVerbatim);
+
+      if (combinedSim > maxSim) {
+        maxSim = combinedSim;
+        bestMatch = existing;
       }
     }
 
-    if (maxSim >= threshold && bestMatch) {
-      duplicates.push({
+    const roundedSim = Math.round(maxSim * 100) / 100;
+
+    if (maxSim >= lowerThreshold && bestMatch) {
+      const matchObj: DuplicateMatch = {
         incoming,
         existing: bestMatch,
-        similarity: Math.round(maxSim * 100) / 100,
+        similarity: roundedSim,
         existingFile: bestMatch.file,
         existingRowIndex: bestMatch.rowIndex
-      });
+      };
+
+      duplicates.push(matchObj);
+
+      if (maxSim >= upperThreshold) {
+        // High confidence (Zone 1: Auto-Merge)
+        autoMergeDuplicates.push(matchObj);
+      } else {
+        // Moderate confidence (Zone 2: Human-in-the-Loop Review Modal)
+        reviewDuplicates.push(matchObj);
+      }
     } else {
+      // Zone 3: Distinct
       unique.push(incoming);
     }
   }
@@ -325,34 +369,38 @@ export async function checkDuplicates(
     saveEmbeddingsCache(csvsDir, cache);
   }
 
-  return { duplicates, unique };
+  return { duplicates, autoMergeDuplicates, reviewDuplicates, unique };
 }
 
 export function mergeProposalRow(
   existingRow: string[],
-  incoming: { verbatim: string; quelldokument: string; seitennummer: string; verarbeitungsdatum: string }
+  incoming: { vorschlag?: string; verbatim: string; quelldokument: string; seitennummer: string; kategorie?: string; cluster?: string; verarbeitungsdatum: string }
 ): string[] {
-  const vorschlag = existingRow[0] || '';
+  const currentVorschlag = existingRow[0] || '';
   const currentVerbatim = existingRow[1] || '';
   const currentSource = existingRow[2] || '';
   const currentPage = existingRow[3] || '';
   const kategorie = existingRow[4] || 'Sonstiges';
-  const currentDate = existingRow[5] || '';
+  const cluster = existingRow.length >= 7 ? (existingRow[5] || 'Allgemein') : (incoming.cluster || 'Allgemein');
+  const currentDate = existingRow.length >= 7 ? (existingRow[6] || '') : (existingRow[5] || '');
 
   const matches = currentVerbatim.match(/\b\d+\)/g);
   const nextNum = matches ? matches.length + 1 : 2;
 
+  let newVorschlag = '';
   let newVerbatim = '';
   let newSource = '';
   let newPage = '';
   let newDate = '';
 
   if (!matches) {
+    newVorschlag = incoming.vorschlag ? `1) ${currentVorschlag} 2) ${incoming.vorschlag}` : currentVorschlag;
     newVerbatim = `1) ${currentVerbatim} 2) ${incoming.verbatim}`;
     newSource = `1) ${currentSource} 2) ${incoming.quelldokument}`;
     newPage = `1) ${currentPage} 2) ${incoming.seitennummer}`;
     newDate = `1) ${currentDate} 2) ${incoming.verarbeitungsdatum}`;
   } else {
+    newVorschlag = incoming.vorschlag ? `${currentVorschlag} ${nextNum}) ${incoming.vorschlag}` : currentVorschlag;
     newVerbatim = `${currentVerbatim} ${nextNum}) ${incoming.verbatim}`;
     newSource = `${currentSource} ${nextNum}) ${incoming.quelldokument}`;
     newPage = `${currentPage} ${nextNum}) ${incoming.seitennummer}`;
@@ -360,11 +408,12 @@ export function mergeProposalRow(
   }
 
   return [
-    vorschlag,
+    newVorschlag,
     newVerbatim,
     newSource,
     newPage,
     kategorie,
+    cluster,
     newDate
   ];
 }

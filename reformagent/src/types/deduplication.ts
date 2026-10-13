@@ -4,6 +4,7 @@ export interface Proposal {
   quelldokument: string;
   seitennummer: string;
   kategorie: string;
+  cluster?: string;
   verarbeitungsdatum: string;
 }
 
@@ -22,6 +23,8 @@ export interface DuplicateMatch {
 
 export interface CheckDuplicatesResult {
   duplicates: DuplicateMatch[];
+  autoMergeDuplicates: DuplicateMatch[];
+  reviewDuplicates: DuplicateMatch[];
   unique: Proposal[];
 }
 

@@ -19,7 +19,12 @@ import {
   syncProcessedHashesWithDisk,
   loadKnownDocumentsRegistry,
   registerDocumentEntry,
-  getAllKnownTitlesAndUrls
+  getAllKnownTitlesAndUrls,
+  getEmbedding,
+  cosineSimilarity,
+  loadEmbeddingsCache,
+  saveEmbeddingsCache,
+  hashText
 } from "./src/server/ragDeduplication"
 import { 
   logExtractionExecution, 
@@ -42,7 +47,7 @@ export default defineConfig({
       configureServer(server) {
         // Helper function to rebuild master CSV
         const rebuildMasterCsv = () => {
-          const header = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n';
+          const header = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Cluster,Verarbeitungsdatum\n';
           
           if (!fs.existsSync(MASTER_SOURCE)) {
             fs.writeFileSync(MASTER_SOURCE, header, 'utf8');
@@ -83,6 +88,46 @@ export default defineConfig({
           return deletedCount;
         };
 
+        // Helper function to update a single proposal row by ID
+        const updateProposalInMaster = (id: string, updated: { text?: string; verbatim?: string; source?: string; page?: string; category?: string; cluster?: string; processedAt?: string }) => {
+          const targetRow = parseInt(String(id).split('_').pop() || '0', 10);
+          if (!fs.existsSync(MASTER_SOURCE)) {
+            throw new Error(`File not found: ${MASTER_SOURCE}`);
+          }
+          const content = fs.readFileSync(MASTER_SOURCE, 'utf8');
+          const rows = parseCsvRows(content);
+          if (rows.length === 0) return false;
+          const header = rows[0].map(escapeCsvField).join(',');
+          const newLines = [header];
+          let currentDataRowIndex = 0;
+          let found = false;
+
+          for (let idx = 1; idx < rows.length; idx++) {
+            const row = rows[idx];
+            if (!row || row.length === 0 || (row.length === 1 && !row[0].trim())) continue;
+            currentDataRowIndex++;
+            if (currentDataRowIndex === targetRow) {
+              found = true;
+              const newText = updated.text !== undefined ? updated.text : (row[0] || '');
+              const newVerbatim = updated.verbatim !== undefined ? updated.verbatim : (row[1] || '');
+              const newSource = updated.source !== undefined ? updated.source : (row[2] || '');
+              const newPage = updated.page !== undefined ? updated.page : (row[3] || '');
+              const newCategory = updated.category !== undefined ? updated.category : (row[4] || 'Sonstiges');
+              const newCluster = updated.cluster !== undefined ? updated.cluster : (row.length >= 7 ? (row[5] || 'Allgemein') : 'Allgemein');
+              const newProcessedAt = updated.processedAt !== undefined ? updated.processedAt : (row.length >= 7 ? (row[6] || '') : (row[5] || ''));
+              newLines.push([newText, newVerbatim, newSource, newPage, newCategory, newCluster, newProcessedAt].map(escapeCsvField).join(','));
+            } else {
+              newLines.push(row.map(escapeCsvField).join(','));
+            }
+          }
+
+          if (found) {
+            fs.writeFileSync(MASTER_SOURCE, newLines.join('\n') + '\n', 'utf8');
+            rebuildMasterCsv();
+          }
+          return found;
+        };
+
         server.middlewares.use(async (req, res, next) => {
 
           if (req.url === '/api/check-duplicates' && req.method === 'POST') {
@@ -93,18 +138,23 @@ export default defineConfig({
               });
               req.on('end', async () => {
                 try {
-                  const { proposals, threshold } = JSON.parse(body);
+                  const { proposals, threshold, lowerThreshold, upperThreshold } = JSON.parse(body);
                   if (!Array.isArray(proposals)) {
                     throw new Error('proposals array is required.');
                   }
                   const csvsDir = path.resolve(__dirname, './csvs');
-                  console.log(`[DEBUG SERVER check-duplicates] Starting with ${proposals.length} proposals, threshold=${threshold}`);
-                  const result = await checkDuplicates(proposals, csvsDir, threshold || 0.85);
-                  console.log(`[DEBUG SERVER check-duplicates] Done: ${result.duplicates.length} duplicates, ${result.unique.length} unique`);
+                  const threshParam = (lowerThreshold !== undefined || upperThreshold !== undefined)
+                    ? { lowerThreshold, upperThreshold }
+                    : (threshold ?? 0.78);
+                  console.log(`[DEBUG SERVER check-duplicates] Starting with ${proposals.length} proposals, thresholdParam=`, threshParam);
+                  const result = await checkDuplicates(proposals, csvsDir, threshParam);
+                  console.log(`[DEBUG SERVER check-duplicates] Done: ${result.duplicates.length} total duplicates (${result.autoMergeDuplicates.length} auto-merge, ${result.reviewDuplicates.length} review), ${result.unique.length} unique`);
                   res.writeHead(200, { 'Content-Type': 'application/json' });
                   res.end(JSON.stringify({ 
                     success: true, 
                     duplicates: result.duplicates, 
+                    autoMergeDuplicates: result.autoMergeDuplicates,
+                    reviewDuplicates: result.reviewDuplicates,
                     unique: result.unique 
                   }));
                 } catch (err: any) {
@@ -132,7 +182,7 @@ export default defineConfig({
                   }
                   const masterPath = path.join(csvsDir, 'reforms_master.csv');
                   if (!fs.existsSync(masterPath)) {
-                    fs.writeFileSync(masterPath, 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n', 'utf8');
+                    fs.writeFileSync(masterPath, 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Cluster,Verarbeitungsdatum\n', 'utf8');
                   }
 
                   // 1. Process merges if any in reforms_master.csv
@@ -159,6 +209,7 @@ export default defineConfig({
                         const incoming = mergeMap.get(currentDataRow);
                         const existingRow = parseCsvLine(line);
                         const updatedRow = mergeProposalRow(existingRow, {
+                          vorschlag: incoming.vorschlag,
                           verbatim: incoming.verbatim,
                           quelldokument: incoming.quelldokument,
                           seitennummer: incoming.seitennummer,
@@ -182,6 +233,7 @@ export default defineConfig({
                         prop.quelldokument,
                         prop.seitennummer,
                         prop.kategorie,
+                        prop.cluster || 'Allgemein',
                         prop.verarbeitungsdatum
                       ];
                       appendContent += row.map(escapeCsvField).join(',') + '\n';
@@ -302,7 +354,8 @@ export default defineConfig({
                     const sourceText = row[2] || '';
                     const page = row[3] || '';
                     const category = row[4] || 'Sonstiges';
-                    const csvProcessedAt = row[5] || '';
+                    const cluster = row.length >= 7 ? (row[5] || 'Allgemein') : 'Allgemein';
+                    const csvProcessedAt = row.length >= 7 ? (row[6] || '') : (row[5] || '');
                     
                     proposals.push({
                       id: String(currentDataRow),
@@ -312,6 +365,7 @@ export default defineConfig({
                       sourceUrl: (sourceText.includes('.') && !sourceText.includes('unknown_document.pdf')) ? sourceText : '',
                       page,
                       category,
+                      cluster,
                       processedAt: csvProcessedAt
                     });
                   }
@@ -484,7 +538,7 @@ export default defineConfig({
               const filePath = '/Users/ali/Desktop/Master Thesis/files/extracted_reforms_database.csv';
               if (!fs.existsSync(filePath)) {
                 res.writeHead(200, { 'Content-Type': 'text/csv' });
-                res.end('Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n');
+                res.end('Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Cluster,Verarbeitungsdatum\n');
                 return;
               }
               const fileContent = fs.readFileSync(filePath);
@@ -493,6 +547,100 @@ export default defineConfig({
                 'Content-Disposition': 'attachment; filename="extracted_reforms_database.csv"'
               });
               res.end(fileContent);
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          } else if (req.url === '/api/calculate-similarity' && req.method === 'POST') {
+            try {
+              let body = '';
+              req.on('data', chunk => {
+                body += chunk.toString();
+              });
+              req.on('end', async () => {
+                try {
+                  const { text1, text2, verbatim1, verbatim2 } = JSON.parse(body || '{}');
+                  const cache = loadEmbeddingsCache(CSVS_DIR);
+                  let cacheModified = false;
+
+                  const getOrFetchEmb = async (txt: string) => {
+                    if (!txt || typeof txt !== 'string' || !txt.trim()) return null;
+                    const key = hashText(txt.trim());
+                    if (cache[key]?.embedding) {
+                      return cache[key].embedding;
+                    }
+                    const emb = await getEmbedding(txt.trim());
+                    cache[key] = { embedding: emb, vorschlag: txt.trim() };
+                    cacheModified = true;
+                    return emb;
+                  };
+
+                  let simVorschlag = 0;
+                  let simVerbatim = 0;
+
+                  const [embT1, embT2, embV1, embV2] = await Promise.all([
+                    getOrFetchEmb(text1),
+                    getOrFetchEmb(text2),
+                    getOrFetchEmb(verbatim1),
+                    getOrFetchEmb(verbatim2)
+                  ]);
+
+                  if (embT1 && embT2) {
+                    simVorschlag = cosineSimilarity(embT1, embT2);
+                  }
+                  if (embV1 && embV2) {
+                    simVerbatim = cosineSimilarity(embV1, embV2);
+                  }
+
+                  if (cacheModified) {
+                    saveEmbeddingsCache(CSVS_DIR, cache);
+                  }
+
+                  const maxSim = Math.max(simVorschlag, simVerbatim);
+                  const similarityPercent = Math.round(maxSim * 100);
+
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({
+                    success: true,
+                    similarity: maxSim,
+                    similarityPercent,
+                    simVorschlag: Math.round(simVorschlag * 100),
+                    simVerbatim: Math.round(simVerbatim * 100)
+                  }));
+                } catch (err: any) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: err.message }));
+                }
+              });
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          } else if (req.url === '/api/update-proposal' && req.method === 'POST') {
+            try {
+              let body = '';
+              req.on('data', chunk => {
+                body += chunk.toString();
+              });
+              req.on('end', () => {
+                try {
+                  const { id, updatedProposal } = JSON.parse(body);
+                  if (!id || !updatedProposal) {
+                    throw new Error('id and updatedProposal are required.');
+                  }
+                  const success = updateProposalInMaster(id, updatedProposal);
+                  if (!success) {
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: `Proposal ${id} not found.` }));
+                    return;
+                  }
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ success: true }));
+                } catch (err: any) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: err.message }));
+                }
+              });
             } catch (err: any) {
               res.writeHead(500, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: err.message }));
@@ -548,7 +696,7 @@ export default defineConfig({
           } else if (req.url === '/api/clear-all-proposals' && req.method === 'POST') {
             try {
               const masterPath = path.resolve(__dirname, './csvs/reforms_master.csv');
-              const header = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Verarbeitungsdatum\n';
+              const header = 'Vorschlag,Exaktes Verbatim,Quelldokument,Seitennummer,Kategorie,Cluster,Verarbeitungsdatum\n';
               fs.writeFileSync(masterPath, header, 'utf8');
               rebuildMasterCsv();
               

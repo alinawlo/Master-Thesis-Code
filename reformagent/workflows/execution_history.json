@@ -1,5 +1,60 @@
 [
   {
+    "executionId": "1790930461138",
+    "fileName": "dihk_positionspapier_digitale_souveraenitaet.pdf",
+    "status": "success",
+    "startedAt": "2026-10-02T08:40:05.032Z",
+    "stoppedAt": "2026-10-02T08:41:01.152Z",
+    "durationMs": 56120,
+    "proposalsCount": 127,
+    "error": null,
+    "timestamp": "2.10.2026, 10:41:01"
+  },
+  {
+    "executionId": "1790897400200",
+    "fileName": "dihk_positionspapier_digitale_souveraenitaet.pdf",
+    "status": "success",
+    "startedAt": "2026-10-01T23:28:55.148Z",
+    "stoppedAt": "2026-10-01T23:30:00.204Z",
+    "durationMs": 65056,
+    "proposalsCount": 122,
+    "error": null,
+    "timestamp": "2.10.2026, 01:30:00"
+  },
+  {
+    "executionId": "1790613242776",
+    "fileName": "pd2.pdf",
+    "status": "success",
+    "startedAt": "2026-09-28T16:33:38.699Z",
+    "stoppedAt": "2026-09-28T16:34:02.778Z",
+    "durationMs": 24079,
+    "proposalsCount": 11,
+    "error": null,
+    "timestamp": "28.9.2026, 18:34:02"
+  },
+  {
+    "executionId": "1790608003843",
+    "fileName": "pd2.pdf",
+    "status": "success",
+    "startedAt": "2026-09-28T15:06:16.640Z",
+    "stoppedAt": "2026-09-28T15:06:43.846Z",
+    "durationMs": 27206,
+    "proposalsCount": 11,
+    "error": null,
+    "timestamp": "28.9.2026, 17:06:43"
+  },
+  {
+    "executionId": "1790603758700",
+    "fileName": "2025-01-20-Wahlen-10-Punkte-Plan.pdf",
+    "status": "success",
+    "startedAt": "2026-09-28T13:55:09.389Z",
+    "stoppedAt": "2026-09-28T13:55:58.712Z",
+    "durationMs": 49323,
+    "proposalsCount": 33,
+    "error": null,
+    "timestamp": "28.9.2026, 15:55:58"
+  },
+  {
     "executionId": "1790419709210",
     "fileName": "pd2.pdf",
     "status": "success",

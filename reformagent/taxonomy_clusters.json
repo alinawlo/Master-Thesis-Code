@@ -1,0 +1,82 @@
+{
+  "IT-Infrastruktur": [
+    "Architekturmanagement",
+    "Basisdienst-Infrastruktur",
+    "Cloud Computing",
+    "Digitale Identitäten & Wallets",
+    "Government as a Platform",
+    "Künstliche Intelligenz",
+    "Nachhaltigkeit",
+    "Open Source",
+    "Register",
+    "Standards",
+    "Telekommunikation & Netze",
+    "Ökosystem"
+  ],
+  "Governance": [
+    "Digitalagentur",
+    "Digitalbudget",
+    "Digitalministerium",
+    "FITKO",
+    "IT-Planungsrat",
+    "Internationale & EU-Governance",
+    "Semantische Interoperabilität",
+    "Strategie-Governance",
+    "Zentrale Steuerung"
+  ],
+  "Strategie": [
+    "Beschaffungswesen",
+    "Daten",
+    "Föderale Digitalstrategie",
+    "Souveränität",
+    "Strategiefähigkeit",
+    "Wirkungsorientierung",
+    "Wirtschafts- & Standortstrategie"
+  ],
+  "Föderalismus": [
+    "Aufgabenteilung",
+    "Finanzierung",
+    "Kollaborationsplattform",
+    "Zentrale Digitalisierung",
+    "Zusammenarbeit"
+  ],
+  "Gesetzgebung": [
+    "Bessere Rechtsetzung & Legistik",
+    "Bürokratieabbau",
+    "Datenschutzrecht",
+    "Digitaltauglichkeit & Digital First",
+    "Planungs- & Genehmigungsrecht",
+    "Verwaltungsrecht",
+    "Vollzugstauglichkeit"
+  ],
+  "Leistungen & Prozesse": [
+    "Automatisierung",
+    "Ende-zu-Ende",
+    "Nutzer:innenorientierung",
+    "Once Only",
+    "One-Stop/No-Stop",
+    "Prozessoptimierung",
+    "Zentralisierung"
+  ],
+  "Organisation": [
+    "Behördenzuschnitt",
+    "Evaluierung & Benchmarking",
+    "Foresight",
+    "Innovationseinheiten",
+    "Ministerien",
+    "New Work",
+    "Projektarbeit",
+    "Transparenz & Partizipation",
+    "Verwaltungskultur & Mindset",
+    "übergreifendes Arbeiten"
+  ],
+  "Personal": [
+    "Führung",
+    "Kompetenzen",
+    "Laufbahnmodelle",
+    "Organisationale Durchlässigkeit",
+    "Personalplanung",
+    "Rekrutierung",
+    "Veränderungsbereitschaft"
+  ]
+}

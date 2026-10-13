@@ -107,13 +107,14 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
 
   // Helper to generate a CSV blob strictly containing the chosen proposals
   const generateProposalsCsv = (proposals: Proposal[]): Blob => {
-    const header = ['Vorschlag', 'Exaktes Verbatim', 'Quelldokument', 'Seitennummer', 'Kategorie', 'Verarbeitungsdatum'];
+    const header = ['Vorschlag', 'Exaktes Verbatim', 'Quelldokument', 'Seitennummer', 'Kategorie', 'Cluster', 'Verarbeitungsdatum'];
     const rows = proposals.map(p => [
       p.vorschlag || '',
       p.verbatim || '',
       p.quelldokument || '',
       p.seitennummer || '',
       p.kategorie || 'Sonstiges',
+      p.cluster || 'Allgemein',
       p.verarbeitungsdatum || new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })
     ].map(val => {
       const s = String(val ?? '');
@@ -129,6 +130,7 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
   // RAG Deduplication States
   const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
   const [pendingDuplicates, setPendingDuplicates] = useState<DuplicateMatch[]>([]);
+  const [pendingAutoMerge, setPendingAutoMerge] = useState<DuplicateMatch[]>([]);
   const [pendingUnique, setPendingUnique] = useState<Proposal[]>([]);
   const [rawCsvText, setRawCsvText] = useState('');
 
@@ -166,13 +168,23 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
     setIsReviewModalOpen(false);
     const targetFileName = 'reforms_master.csv';
     
-    const merges = decisions
+    // 1. User manual merges from the Review Modal
+    const userMerges = decisions
       .filter(d => d.action === 'merge')
       .map(d => ({
         existingFile: 'reforms_master.csv',
         existingRowIndex: d.match.existingRowIndex,
         incoming: d.match.incoming
       }));
+
+    // 2. High-confidence auto-merges (Zone 1: >= 0.88)
+    const autoMerges = pendingAutoMerge.map(d => ({
+      existingFile: 'reforms_master.csv',
+      existingRowIndex: d.existingRowIndex,
+      incoming: d.incoming
+    }));
+
+    const allMerges = [...autoMerges, ...userMerges];
       
     // Proposals explicitly marked as 'keep' (to be added as new separate rows)
     const keptAsNew = decisions
@@ -180,9 +192,10 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
       .map(d => d.match.incoming);
 
     // Proposals marked as 'merge' (merged with existing entries)
-    const mergedProposals = decisions
-      .filter(d => d.action === 'merge')
-      .map(d => d.match.incoming);
+    const mergedProposals = [
+      ...pendingAutoMerge.map(d => d.incoming),
+      ...decisions.filter(d => d.action === 'merge').map(d => d.match.incoming)
+    ];
       
     const allNewProposals = [...pendingUnique, ...keptAsNew];
     // All proposals picked by the user (unique + kept as new row + merged with existing)
@@ -192,7 +205,7 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
     const chosenCsvBlob = generateProposalsCsv(allPickedProposals);
     setCsvBlob(chosenCsvBlob);
     
-    addLog(`Saving ${merges.length} merged proposal(s) and ${allNewProposals.length} new proposal(s) to master database...`);
+    addLog(`Saving ${allMerges.length} merged proposal(s) (${autoMerges.length} auto-merged, ${userMerges.length} manual) and ${allNewProposals.length} new proposal(s) to master database...`);
     
     const currentDocName = localFileName || (selectedFile ? selectedFile.name : fileName);
     try {
@@ -203,13 +216,13 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
           fileName: targetFileName,
           documentFileName: currentDocName,
           newProposals: allNewProposals,
-          merges: merges
+          merges: allMerges
         })
       });
       
       if (saveResponse.ok) {
         addLog("Success: Deduplication choices saved and master CSV updated.");
-        toast.success(`Saved ${allNewProposals.length} new proposals and merged ${merges.length} sources.`);
+        toast.success(`Saved ${allNewProposals.length} new proposals and merged ${allMerges.length} sources.`);
         setProposalCount(allPickedProposals.length);
         if (onDocumentProcessed) onDocumentProcessed(currentDocName);
         setIsProcessing(false);
@@ -310,13 +323,18 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
             quelldokument = `${currentDocName} (${rawSource})`;
           }
 
+          const kategorie = (row[4] || 'Sonstiges').trim();
+          const cluster = row.length >= 7 ? (row[5] || 'Allgemein').trim() : 'Allgemein';
+          const verarbeitungsdatum = (row.length >= 7 ? (row[6] || '') : (row[5] || '') || new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })).trim();
+
           parsedProposals.push({
             vorschlag: (row[0] || '').trim(),
             verbatim: (row[1] || '').trim(),
             quelldokument,
             seitennummer: (row[3] || '').trim(),
-            kategorie: (row[4] || 'Sonstiges').trim(),
-            verarbeitungsdatum: (row[5] || new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' })).trim()
+            kategorie,
+            cluster,
+            verarbeitungsdatum
           });
         }
       }
@@ -336,14 +354,17 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
         return;
       }
 
-      // Run RAG Semantic Deduplication check
-      addLog("Running RAG semantic similarity check against master database...");
+      // Run RAG Semantic Deduplication check (Dual-Signal, threshold = 0.75)
+      addLog("Running RAG semantic similarity check against master database (threshold = 0.75)...");
       setProgress(85);
 
       const dedupRes = await fetch('/api/check-duplicates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ proposals: parsedProposals, threshold: 0.78 })
+        body: JSON.stringify({ 
+          proposals: parsedProposals, 
+          threshold: 0.75
+        })
       });
 
       setProgress(100);
@@ -354,23 +375,25 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
         const unique: Proposal[] = dedupData.unique || [];
 
         if (duplicates.length > 0) {
-          addLog(`RAG Analysis: Found ${duplicates.length} semantic duplicate(s) and ${unique.length} unique proposal(s).`);
+          addLog(`RAG Analysis: Found ${duplicates.length} duplicate candidate(s) (≥ 0.75) and ${unique.length} unique proposal(s). Opening review modal...`);
           setPendingDuplicates(duplicates);
+          setPendingAutoMerge([]);
           setPendingUnique(unique);
           setIsProcessing(false);
           setIsReviewModalOpen(true);
-          // Wait for user modal decision
+          // Wait for user modal decision (Merge, Keep Separate, or Discard)
           return;
         } else {
-          addLog("RAG Analysis: All extracted proposals are unique.");
+          addLog("RAG Analysis: All extracted proposals are unique (< 0.75).");
         }
       } else {
         addLog("Warning: Deduplication service returned an error, proceeding with standard save.");
       }
 
-      // No duplicates: save directly to reforms_master.csv
-      addLog("Saving proposals to master database (reforms_master.csv)...");
+      // No duplicates found (< 0.75): save directly to reforms_master.csv
       const targetFileName = 'reforms_master.csv';
+      addLog(`Saving ${parsedProposals.length} unique proposal(s) to master database (reforms_master.csv)...`);
+
       const saveResponse = await fetch('/api/save-csv', {
         method: 'POST',
         headers: {
@@ -379,7 +402,8 @@ export default function Pipeline({ localFileName, onComplete, onCancel, onDocume
         body: JSON.stringify({
           fileName: targetFileName,
           documentFileName: currentDocName,
-          newProposals: parsedProposals
+          newProposals: parsedProposals,
+          merges: []
         })
       });
 
